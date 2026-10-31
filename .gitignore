@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# 构建 / 打包
+build/
+dist/
+*.spec
+*.egg-info/
+.eggs/
+
+# 本地游戏数据与备份（本仓库只放源码，不放存档）
+*.dat
+*.dat_old
+*.mca
+*.mcr
+*.mcc
+session.lock
+.mctool_backups/
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# IDE / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
