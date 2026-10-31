@@ -1,0 +1,16 @@
+# mctool GUI 配置文件 / mctool GUI configuration
+#
+# language: 界面显示语言，可选值:
+#   "zh_cn"  简体中文 (Simplified Chinese)
+#   "en_us"  English
+# 修改后重新启动程序生效。若本文件缺失、无法解析或 language 无效，
+# 程序启动时会回退为英文（en_us）。环境变量 MCS_LANG 的优先级高于本文件。
+#
+# language: UI language. Allowed values:
+#   "zh_cn"  Simplified Chinese
+#   "en_us"  English
+# Restart the application to apply changes. If this file is missing,
+# cannot be parsed, or `language` is invalid, the application falls back
+# to English (en_us) at startup. The MCS_LANG environment variable takes
+# precedence over this file.
+language = "zh_cn"

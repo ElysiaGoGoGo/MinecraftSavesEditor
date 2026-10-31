@@ -32,6 +32,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__ as APP_VERSION
+from .i18n import get_language, tr
 from .level import DIFFICULTIES, GAME_TYPES, LevelData
 from .lock import WorldInUseError
 from .nbt import (
@@ -50,8 +51,6 @@ from .curios import (
     CURIO_MC_VERSION,
     CURIO_MOD_VERSION,
     CURIO_NEOFORGE_VERSION,
-    CURIO_VALIDATION_WARNING,
-    CURIO_VERSION_WARNING,
     delete_curio_item,
     get_curio_item,
     has_curios,
@@ -62,8 +61,8 @@ from .curios import (
     update_curio_item,
 )
 from .items import (
+    ARMOR_LABELS,
     INVENTORY_SLOTS,
-    describe_item,
     extra_key,
     item_count,
     item_extra,
@@ -88,14 +87,18 @@ __all__ = [
     "main",
 ]
 
-APP_TITLE = f"mctool — Minecraft 存档工具（自动识别版本，v{APP_VERSION}）"
+APP_TITLE = tr("app.title", version=APP_VERSION)
 WINDOW_SIZE = "1150x760"
 MIN_WINDOW_SIZE = (980, 620)
 
 GAME_TYPE_CHOICES = tuple(GAME_TYPES.values())  # survival/creative/adventure/spectator
 DIFFICULTY_CHOICES = tuple(DIFFICULTIES.values())  # peaceful/easy/normal/hard
 WEATHER_CHOICES = ("clear", "rain", "thunder")
-WEATHER_LABELS = {"clear": "晴朗", "rain": "下雨", "thunder": "雷雨"}
+WEATHER_LABELS = {
+    "clear": tr("weather.clear"),
+    "rain": tr("weather.rain"),
+    "thunder": tr("weather.thunder"),
+}
 NBT_VALUE_TYPES = (
     "auto",
     "byte",
@@ -113,6 +116,73 @@ NBT_VALUE_TYPES = (
     "list",
 )
 PLAYER_DIMENSION_CHOICES = tuple(PLAYER_DIMENSION_IDS.keys())  # overworld/nether/end
+
+
+# --------------------------------------------------------------------------- #
+# 国际化辅助（仅处理显示文本，技术值保持原样）
+# --------------------------------------------------------------------------- #
+def _label(text: str) -> str:
+    """给表单标签补上本地化冒号。"""
+    return tr("common.label_format", label=text)
+
+
+def _info_label_width() -> int:
+    """只读信息栏标签宽度：中文 12，英文放宽以容纳更长的单词。"""
+    return 12 if get_language() == "zh_cn" else 18
+
+
+def _slot_label(slot: int) -> str:
+    """本地化的物品栏槽位名（0..8 快捷栏、9..35 背包、盔甲、副手）。"""
+    if 0 <= slot <= 8:
+        return tr("items.slot.hotbar", index=slot + 1)
+    if 9 <= slot <= 35:
+        return tr("items.slot.inventory", index=slot + 1)
+    if slot in ARMOR_LABELS:
+        return tr(f"items.slot.armor.{slot}", default=slot_label(slot))
+    if slot == 150:
+        return tr("items.slot.offhand")
+    return tr("items.slot.other", slot=slot)
+
+
+def _describe_item(tag: CompoundTag, item_format: str) -> str:
+    """本地化的物品简述：id x count (+ 是否有额外 NBT)。"""
+    extra = item_extra(tag, item_format)
+    suffix = ""
+    if extra is not None and len(extra) > 0:
+        suffix = tr("items.describe.extra_suffix")
+    return tr(
+        "items.describe.pattern",
+        id=item_id(tag) or "?",
+        count=item_count(tag, item_format),
+        suffix=suffix,
+    )
+
+
+def _curio_slot_name(identifier: str) -> str:
+    """本地化的 Curios 槽位组名；未知标识回退到核心层显示名。"""
+    return tr(
+        f"curios.group.{identifier}",
+        default=slot_display_name(identifier),
+    )
+
+
+def _version_status_label(profile: Any) -> str:
+    """本地化的版本状态标签（已验证 / 兼容）。"""
+    return tr(
+        f"version.status.{getattr(profile, 'status', '')}",
+        default=getattr(profile, "status_label", ""),
+    )
+
+
+def _version_choice_label(profile: Any) -> str:
+    """本地化的版本选择项文本（id + 状态 + DataVersion）。"""
+    return tr(
+        "version.choice_label",
+        id=getattr(profile, "id", ""),
+        status=_version_status_label(profile),
+        data_version=getattr(profile, "data_version", "?"),
+    )
+
 
 
 # --------------------------------------------------------------------------- #
@@ -136,15 +206,21 @@ def _parse_int(
 ) -> int:
     raw = str(text).strip()
     if raw == "":
-        raise ValueError(f"{field}不能为空")
+        raise ValueError(tr("error.field_empty", field=field))
     try:
         value = int(raw, 10)
     except ValueError:
-        raise ValueError(f"{field}必须是整数，当前输入为 {raw!r}") from None
+        raise ValueError(
+            tr("error.field_not_int", field=field, value=repr(raw))
+        ) from None
     if minimum is not None and value < minimum:
-        raise ValueError(f"{field}必须大于等于 {minimum}（当前 {value}）")
+        raise ValueError(
+            tr("error.field_min", field=field, minimum=minimum, value=value)
+        )
     if maximum is not None and value > maximum:
-        raise ValueError(f"{field}必须小于等于 {maximum}（当前 {value}）")
+        raise ValueError(
+            tr("error.field_max", field=field, maximum=maximum, value=value)
+        )
     return value
 
 
@@ -156,17 +232,23 @@ def _parse_float(
 ) -> float:
     raw = str(text).strip()
     if raw == "":
-        raise ValueError(f"{field}不能为空")
+        raise ValueError(tr("error.field_empty", field=field))
     try:
         value = float(raw)
     except ValueError:
-        raise ValueError(f"{field}必须是数字，当前输入为 {raw!r}") from None
+        raise ValueError(
+            tr("error.field_not_number", field=field, value=repr(raw))
+        ) from None
     if not math.isfinite(value):
-        raise ValueError(f"{field}必须是有限数字")
+        raise ValueError(tr("error.field_not_finite", field=field))
     if minimum is not None and value < minimum:
-        raise ValueError(f"{field}必须大于等于 {minimum:g}（当前 {value:g}）")
+        raise ValueError(
+            tr("error.field_min", field=field, minimum=minimum, value=value)
+        )
     if maximum is not None and value > maximum:
-        raise ValueError(f"{field}必须小于等于 {maximum:g}（当前 {value:g}）")
+        raise ValueError(
+            tr("error.field_max", field=field, maximum=maximum, value=value)
+        )
     return value
 
 
@@ -212,7 +294,12 @@ def _dedupe(items: list[str]) -> list[str]:
 class _Tab(ttk.Frame):
     """所有标签页的基类。"""
 
-    title = "标签页"
+    title_key = "tab.generic"
+
+    @property
+    def title(self) -> str:
+        """标签页标题（已按当前语言翻译）。"""
+        return tr(self.title_key)
 
     def __init__(self, master: tk.Misc, app: "McToolGUI"):
         super().__init__(master, padding=10)
@@ -234,17 +321,15 @@ class _Tab(ttk.Frame):
     def require_world(self) -> World:
         world = self.app.world
         if world is None:
-            raise RuntimeError(
-                "尚未打开世界。请点击上方“打开世界...”选择一个包含 level.dat 的存档目录。"
-            )
+            raise RuntimeError(tr("error.no_world_hint"))
         return world
 
     def _run_ui(self, action: Callable[[], Any], status: Optional[str] = None) -> Any:
-        """执行按钮回调：失败时弹中文错误框（公开方法本身不会弹框）。"""
+        """执行按钮回调：失败时弹出错误框（公开方法本身不会弹框）。"""
         try:
             result = action()
         except Exception as exc:  # noqa: BLE001 - UI 边界统一处理
-            self.app.show_error("操作失败", exc)
+            self.app.show_error(tr("dialog.error.operation.title"), exc)
             return None
         if status:
             self.app.set_status(status)
@@ -264,7 +349,7 @@ class _Tab(ttk.Frame):
 class WorldTab(_Tab):
     """世界信息展示 + level.dat 常用字段修改 + GameRules。"""
 
-    title = "世界信息"
+    title_key = "tab.world"
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=3)
@@ -278,30 +363,30 @@ class WorldTab(_Tab):
 
         # ---- 只读信息 ---------------------------------------------------- #
         self._info_vars: dict[str, tk.StringVar] = {}
-        info_box = ttk.LabelFrame(left, text="世界信息（只读）", padding=8)
+        info_box = ttk.LabelFrame(left, text=tr("world.info_box"), padding=8)
         info_box.grid(row=0, column=0, sticky="ew")
         info_box.columnconfigure(1, weight=1)
         info_rows = [
-            ("level_name", "世界名称"),
+            ("level_name", tr("world.info.level_name")),
             ("data_version", "DataVersion"),
-            ("version", "游戏版本"),
-            ("detected_version", "检测版本"),
-            ("selected_version", "处理版本"),
-            ("version_mode", "版本模式"),
-            ("seed", "种子"),
-            ("game_type", "默认游戏模式"),
-            ("difficulty", "难度"),
-            ("hardcore", "极限模式"),
-            ("allow_commands", "允许命令"),
-            ("spawn", "出生点"),
-            ("time", "时间"),
-            ("weather", "天气"),
-            ("dimensions", "维度"),
+            ("version", tr("world.info.version")),
+            ("detected_version", tr("world.info.detected_version")),
+            ("selected_version", tr("world.info.selected_version")),
+            ("version_mode", tr("world.info.version_mode")),
+            ("seed", tr("world.info.seed")),
+            ("game_type", tr("world.info.game_type")),
+            ("difficulty", tr("world.info.difficulty")),
+            ("hardcore", tr("world.info.hardcore")),
+            ("allow_commands", tr("world.info.allow_commands")),
+            ("spawn", tr("world.info.spawn")),
+            ("time", tr("world.info.time")),
+            ("weather", tr("world.info.weather")),
+            ("dimensions", tr("world.info.dimensions")),
         ]
         for row, (key, label) in enumerate(info_rows):
             var = tk.StringVar(value="—")
             self._info_vars[key] = var
-            ttk.Label(info_box, text=f"{label}：", width=12, anchor="w").grid(
+            ttk.Label(info_box, text=_label(label), width=_info_label_width(), anchor="w").grid(
                 row=row, column=0, sticky="w", pady=1
             )
             ttk.Label(info_box, textvariable=var, anchor="w", wraplength=430).grid(
@@ -309,7 +394,7 @@ class WorldTab(_Tab):
             )
 
         # ---- 可编辑设置 -------------------------------------------------- #
-        settings = ttk.LabelFrame(left, text="修改世界设置", padding=8)
+        settings = ttk.LabelFrame(left, text=tr("world.settings_box"), padding=8)
         settings.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         settings.columnconfigure(1, weight=1)
         settings.columnconfigure(3, weight=1)
@@ -328,47 +413,63 @@ class WorldTab(_Tab):
         self.spawn_z_var = tk.StringVar(value="0")
         self.spawn_angle_var = tk.StringVar(value="0.0")
 
-        ttk.Label(settings, text="世界名称：").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.level_name"))).grid(
+            row=0, column=0, sticky="w", pady=3
+        )
         self.level_name_entry = ttk.Entry(settings, textvariable=self.level_name_var)
         self.level_name_entry.grid(row=0, column=1, columnspan=3, sticky="ew", pady=3)
 
-        ttk.Label(settings, text="默认游戏模式：").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.game_type"))).grid(
+            row=1, column=0, sticky="w", pady=3
+        )
         self.gametype_combo = ttk.Combobox(
             settings, textvariable=self.gametype_var, values=GAME_TYPE_CHOICES,
             state="readonly", width=14,
         )
         self.gametype_combo.grid(row=1, column=1, sticky="w", pady=3)
-        ttk.Label(settings, text="难度：").grid(row=1, column=2, sticky="e", padx=(12, 6), pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.difficulty"))).grid(
+            row=1, column=2, sticky="e", padx=(12, 6), pady=3
+        )
         self.difficulty_combo = ttk.Combobox(
             settings, textvariable=self.difficulty_var, values=DIFFICULTY_CHOICES,
             state="readonly", width=14,
         )
         self.difficulty_combo.grid(row=1, column=3, sticky="w", pady=3)
 
-        ttk.Label(settings, text="游戏时间 Time：").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.time"))).grid(
+            row=2, column=0, sticky="w", pady=3
+        )
         self.time_entry = ttk.Entry(settings, textvariable=self.time_var, width=16)
         self.time_entry.grid(row=2, column=1, sticky="w", pady=3)
-        ttk.Label(settings, text="昼间时间 DayTime：").grid(row=2, column=2, sticky="e", padx=(12, 6), pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.day_time"))).grid(
+            row=2, column=2, sticky="e", padx=(12, 6), pady=3
+        )
         self.day_time_entry = ttk.Entry(settings, textvariable=self.day_time_var, width=16)
         self.day_time_entry.grid(row=2, column=3, sticky="w", pady=3)
 
-        ttk.Label(settings, text="天气：").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.weather"))).grid(
+            row=3, column=0, sticky="w", pady=3
+        )
         self.weather_combo = ttk.Combobox(
             settings, textvariable=self.weather_var, values=WEATHER_CHOICES,
             state="readonly", width=14,
         )
         self.weather_combo.grid(row=3, column=1, sticky="w", pady=3)
-        ttk.Label(settings, text="持续时间(刻)：").grid(row=3, column=2, sticky="e", padx=(12, 6), pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.weather_duration"))).grid(
+            row=3, column=2, sticky="e", padx=(12, 6), pady=3
+        )
         self.weather_duration_entry = ttk.Entry(settings, textvariable=self.weather_duration_var, width=16)
         self.weather_duration_entry.grid(row=3, column=3, sticky="w", pady=3)
 
-        ttk.Label(settings, text="出生点：").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(settings, text=_label(tr("world.label.spawn"))).grid(
+            row=4, column=0, sticky="w", pady=3
+        )
         spawn_frame = ttk.Frame(settings)
         spawn_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
         self.spawn_entries: dict[str, ttk.Entry] = {}
         for index, (label, var) in enumerate(
             (("X", self.spawn_x_var), ("Y", self.spawn_y_var),
-             ("Z", self.spawn_z_var), ("朝向", self.spawn_angle_var))
+             ("Z", self.spawn_z_var), (tr("world.label.spawn_angle"), self.spawn_angle_var))
         ):
             ttk.Label(spawn_frame, text=label).grid(
                 row=0, column=index * 2, padx=(0 if index == 0 else 10, 2)
@@ -380,21 +481,21 @@ class WorldTab(_Tab):
         button_row = ttk.Frame(settings)
         button_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.apply_button = ttk.Button(
-            button_row, text="应用世界设置", style="Accent.TButton",
+            button_row, text=tr("button.apply_world"), style="Accent.TButton",
             command=self._ui_apply,
         )
         self.apply_button.pack(side="left")
         self.reload_button = ttk.Button(
-            button_row, text="重新读取 level.dat", command=self._ui_reload,
+            button_row, text=tr("button.reload_level"), command=self._ui_reload,
         )
         self.reload_button.pack(side="left", padx=(8, 0))
         ttk.Label(
-            button_row, text="（写入前自动备份，备份路径显示在底部状态栏）",
+            button_row, text=tr("world.hint.backup"),
             style="Hint.TLabel",
         ).pack(side="left", padx=(10, 0))
 
         # ---- GameRules --------------------------------------------------- #
-        rules_box = ttk.LabelFrame(self, text="游戏规则（GameRules）", padding=8)
+        rules_box = ttk.LabelFrame(self, text=tr("world.gamerules_box"), padding=8)
         rules_box.grid(row=0, column=1, sticky="nsew")
         rules_box.columnconfigure(0, weight=1)
         rules_box.rowconfigure(0, weight=1)
@@ -407,8 +508,8 @@ class WorldTab(_Tab):
             tree_frame, columns=("name", "value"), show="headings", height=16,
             selectmode="browse",
         )
-        self.gamerule_tree.heading("name", text="规则名")
-        self.gamerule_tree.heading("value", text="值")
+        self.gamerule_tree.heading("name", text=tr("world.heading.rule_name"))
+        self.gamerule_tree.heading("value", text=tr("world.heading.value"))
         self.gamerule_tree.column("name", width=200, anchor="w")
         self.gamerule_tree.column("value", width=80, anchor="w")
         rule_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.gamerule_tree.yview)
@@ -421,17 +522,23 @@ class WorldTab(_Tab):
         controls = ttk.Frame(rules_box)
         controls.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         controls.columnconfigure(1, weight=1)
-        ttk.Label(controls, text="规则：").grid(row=0, column=0, sticky="w")
+        ttk.Label(controls, text=_label(tr("world.heading.rule_name"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.gamerule_name_var = tk.StringVar()
         self.gamerule_name_combo = ttk.Combobox(
             controls, textvariable=self.gamerule_name_var, state="readonly",
         )
         self.gamerule_name_combo.grid(row=0, column=1, columnspan=2, sticky="ew")
-        ttk.Label(controls, text="值：").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(controls, text=_label(tr("world.heading.value"))).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
         self.gamerule_value_var = tk.StringVar()
         self.gamerule_value_entry = ttk.Entry(controls, textvariable=self.gamerule_value_var)
         self.gamerule_value_entry.grid(row=1, column=1, sticky="ew", pady=(6, 0))
-        self.set_rule_button = ttk.Button(controls, text="设置规则", command=self._ui_set_rule)
+        self.set_rule_button = ttk.Button(
+            controls, text=tr("button.set_rule"), command=self._ui_set_rule,
+        )
         self.set_rule_button.grid(row=1, column=2, padx=(8, 0), pady=(6, 0))
 
     # ---- 内部 ------------------------------------------------------------ #
@@ -464,7 +571,9 @@ class WorldTab(_Tab):
         self._run_ui(self.apply_world_settings)
 
     def _ui_reload(self) -> None:
-        self._run_ui(self.app.reload_level, status="已重新读取 level.dat")
+        self._run_ui(
+            self.app.reload_level, status=tr("status.level_reloaded"),
+        )
 
     def _ui_set_rule(self) -> None:
         name = self.gamerule_name_var.get().strip()
@@ -520,42 +629,59 @@ class WorldTab(_Tab):
         thunder_time = weather.get("thunder_time", 0)
         clear_time = weather.get("clear_weather_time", 0)
         if weather.get("thundering"):
-            weather_text = f"雷雨（rainTime={rain_time}, thunderTime={thunder_time}）"
+            weather_text = tr(
+                "world.weather.thunder",
+                rain_time=rain_time,
+                thunder_time=thunder_time,
+            )
         elif weather.get("raining"):
-            weather_text = f"下雨（rainTime={rain_time}）"
+            weather_text = tr("world.weather.rain", rain_time=rain_time)
         else:
-            weather_text = f"晴朗（clearWeatherTime={clear_time}）"
+            weather_text = tr("world.weather.clear", clear_time=clear_time)
 
         spawn = summary.get("spawn") or [0, -60, 0]
         info = {
             "level_name": str(summary.get("level_name") or ""),
             "data_version": str(summary.get("data_version", -1)),
-            "version": (
-                f"{version.get('name')}（Id={version.get('id')}, "
-                f"Series={version.get('series')}）"
+            "version": tr(
+                "world.info.version_format",
+                name=version.get("name"),
+                id=version.get("id"),
+                series=version.get("series"),
             ),
             "seed": str(summary.get("seed", 0)),
             "game_type": str(summary.get("game_type") or ""),
             "difficulty": str(summary.get("difficulty") or ""),
-            "hardcore": "是" if summary.get("hardcore") else "否",
-            "allow_commands": "是" if summary.get("allow_commands") else "否",
-            "spawn": (
-                f"({spawn[0]}, {spawn[1]}, {spawn[2]})，"
-                f"朝向 {summary.get('spawn_angle', 0.0):g}°"
+            "hardcore": tr("common.yes") if summary.get("hardcore") else tr("common.no"),
+            "allow_commands": (
+                tr("common.yes") if summary.get("allow_commands") else tr("common.no")
+            ),
+            "spawn": tr(
+                "world.info.spawn_format",
+                x=spawn[0],
+                y=spawn[1],
+                z=spawn[2],
+                angle=summary.get("spawn_angle", 0.0),
             ),
             "time": f"Time={summary.get('time', 0)}, DayTime={summary.get('day_time', 0)}",
             "weather": weather_text,
-            "dimensions": "、".join(world.list_dimensions()),
+            "dimensions": tr("common.list_separator").join(world.list_dimensions()),
         }
         detected = getattr(world, "detected_version", None)
         profile = getattr(world, "version_profile", None)
         info["detected_version"] = detected.display if detected is not None else "—"
         info["selected_version"] = (
-            f"{profile.id}（{profile.status_label}）" if profile is not None else "—"
+            tr(
+                "world.info.selected_version_format",
+                id=profile.id,
+                status=_version_status_label(profile),
+            )
+            if profile is not None
+            else "—"
         )
-        mode = "自动（受支持）" if getattr(world, "version_auto", True) else "用户指定"
+        mode = tr("version.mode_auto") if getattr(world, "version_auto", True) else tr("version.mode_manual")
         if getattr(world, "version_override", False):
-            mode += "（与检测版本不一致，写入有风险）"
+            mode += tr("version.mode_mismatch_suffix")
         info["version_mode"] = mode
         for key, value in info.items():
             self._info_vars[key].set(value)
@@ -578,7 +704,7 @@ class WorldTab(_Tab):
         world = self.app.world
         if world is None:
             for var in self._info_vars.values():
-                var.set("（未打开世界）")
+                var.set(tr("common.no_world"))
             self.gamerule_tree.delete(*self.gamerule_tree.get_children())
             self.gamerule_name_combo["values"] = ()
             self.gamerule_name_var.set("")
@@ -596,50 +722,71 @@ class WorldTab(_Tab):
 
         name = str(self._pick(overrides, ("level_name", "name"), self.level_name_var)).strip()
         if not name:
-            raise ValueError("世界名称不能为空")
+            raise ValueError(tr("world.error.name_empty"))
         game_type = str(
             self._pick(overrides, ("game_type", "gametype"), self.gametype_var)
         ).strip().lower()
         if game_type not in GAME_TYPE_CHOICES:
             raise ValueError(
-                f"未知游戏模式：{game_type!r}（可选 {' / '.join(GAME_TYPE_CHOICES)}）"
+                tr(
+                    "error.unknown_game_type",
+                    value=repr(game_type),
+                    choices=" / ".join(GAME_TYPE_CHOICES),
+                )
             )
         difficulty = str(
             self._pick(overrides, ("difficulty",), self.difficulty_var)
         ).strip().lower()
         if difficulty not in DIFFICULTY_CHOICES:
             raise ValueError(
-                f"未知难度：{difficulty!r}（可选 {' / '.join(DIFFICULTY_CHOICES)}）"
+                tr(
+                    "error.unknown_difficulty",
+                    value=repr(difficulty),
+                    choices=" / ".join(DIFFICULTY_CHOICES),
+                )
             )
         weather = str(
             self._pick(overrides, ("weather",), self.weather_var)
         ).strip().lower()
         if weather not in WEATHER_CHOICES:
             raise ValueError(
-                f"未知天气：{weather!r}（可选 {' / '.join(WEATHER_CHOICES)}）"
+                tr(
+                    "error.unknown_weather",
+                    value=repr(weather),
+                    choices=" / ".join(WEATHER_CHOICES),
+                )
             )
 
         game_time = _parse_int(
             self._pick(overrides, ("time", "game_time"), self.time_var),
-            "游戏时间 Time",
+            tr("field.game_time"),
             minimum=0,
         )
         day_time = _parse_int(
             self._pick(overrides, ("day_time",), self.day_time_var),
-            "昼间时间 DayTime",
+            tr("field.day_time"),
             minimum=0,
         )
         weather_duration = _parse_int(
             self._pick(overrides, ("weather_duration", "duration"), self.weather_duration_var),
-            "天气持续时间",
+            tr("field.weather_duration"),
             minimum=0,
         )
-        spawn_x = _parse_int(self._pick(overrides, ("spawn_x", "x"), self.spawn_x_var), "出生点 X")
-        spawn_y = _parse_int(self._pick(overrides, ("spawn_y", "y"), self.spawn_y_var), "出生点 Y")
-        spawn_z = _parse_int(self._pick(overrides, ("spawn_z", "z"), self.spawn_z_var), "出生点 Z")
+        spawn_x = _parse_int(
+            self._pick(overrides, ("spawn_x", "x"), self.spawn_x_var),
+            tr("field.spawn_x"),
+        )
+        spawn_y = _parse_int(
+            self._pick(overrides, ("spawn_y", "y"), self.spawn_y_var),
+            tr("field.spawn_y"),
+        )
+        spawn_z = _parse_int(
+            self._pick(overrides, ("spawn_z", "z"), self.spawn_z_var),
+            tr("field.spawn_z"),
+        )
         spawn_angle = _parse_float(
             self._pick(overrides, ("spawn_angle", "angle"), self.spawn_angle_var),
-            "出生点朝向",
+            tr("field.spawn_angle"),
         )
 
         world.level.set_level_name(name)
@@ -657,8 +804,16 @@ class WorldTab(_Tab):
         self.refresh()
         self.app.show_backups(new_backups)
         self.app.set_status(
-            f"已应用世界设置：名称={name!r}，模式={game_type}，难度={difficulty}，"
-            f"Time={game_time}，DayTime={day_time}，天气={weather}（{weather_duration} 刻）"
+            tr(
+                "status.world_settings_applied",
+                name=repr(name),
+                game_type=game_type,
+                difficulty=difficulty,
+                time=game_time,
+                day_time=day_time,
+                weather=weather,
+                duration=weather_duration,
+            )
         )
         return new_backups
 
@@ -668,11 +823,13 @@ class WorldTab(_Tab):
         rule_name = str(name).strip()
         rule_value = str(value).strip()
         if not rule_name:
-            raise ValueError("规则名不能为空")
+            raise ValueError(tr("world.error.rule_name_empty"))
         if not rule_value:
-            raise ValueError("规则值不能为空（例如 true / false / 10）")
+            raise ValueError(tr("world.error.rule_value_empty"))
         if any(ch.isspace() for ch in rule_value):
-            raise ValueError(f"规则值不能包含空白字符：{rule_value!r}")
+            raise ValueError(
+                tr("world.error.rule_value_whitespace", value=repr(rule_value))
+            )
 
         world.level.set_gamerule(rule_name, rule_value)
         world.mark_level_dirty()
@@ -683,7 +840,9 @@ class WorldTab(_Tab):
 
         self.refresh()
         self.app.show_backups(new_backups)
-        self.app.set_status(f"已设置游戏规则 {rule_name} = {rule_value}")
+        self.app.set_status(
+            tr("status.gamerule_set", name=rule_name, value=rule_value)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -692,7 +851,7 @@ class WorldTab(_Tab):
 class BlockTab(_Tab):
     """方块读取/修改、区块摘要、方块实体 SNBT 编辑。"""
 
-    title = "方块 / 方块实体"
+    title_key = "tab.block"
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -700,7 +859,7 @@ class BlockTab(_Tab):
 
         top = ttk.Frame(self)
         top.grid(row=0, column=0, sticky="ew")
-        ttk.Label(top, text="维度：").pack(side="left")
+        ttk.Label(top, text=_label(tr("label.dimension"))).pack(side="left")
         self.dimension_var = tk.StringVar(value="overworld")
         self.dimension_combo = ttk.Combobox(
             top, textvariable=self.dimension_var, values=["overworld"], width=24,
@@ -708,11 +867,11 @@ class BlockTab(_Tab):
         self.dimension_combo.pack(side="left")
         self.dimension_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_dimension_changed())
         ttk.Label(
-            top, text="（overworld / nether / end 或 namespace:path）", style="Hint.TLabel",
+            top, text=tr("block.hint.dimension"), style="Hint.TLabel",
         ).pack(side="left", padx=(8, 0))
 
         # ---- 方块 -------------------------------------------------------- #
-        block_box = ttk.LabelFrame(self, text="方块", padding=8)
+        block_box = ttk.LabelFrame(self, text=tr("block.box"), padding=8)
         block_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         block_box.columnconfigure(0, weight=1)
 
@@ -732,11 +891,11 @@ class BlockTab(_Tab):
             entry.grid(row=0, column=index * 2 + 1)
             self.coord_entries[label] = entry
         self.read_block_button = ttk.Button(
-            coord_frame, text="读取方块", command=self._ui_read_block,
+            coord_frame, text=tr("button.read_block"), command=self._ui_read_block,
         )
         self.read_block_button.grid(row=0, column=6, padx=(12, 0))
 
-        self.block_display_var = tk.StringVar(value="（尚未读取方块）")
+        self.block_display_var = tk.StringVar(value=tr("block.not_read"))
         ttk.Label(
             block_box, textvariable=self.block_display_var, anchor="w",
             font=("Microsoft YaHei UI", 10, "bold"),
@@ -745,30 +904,30 @@ class BlockTab(_Tab):
         state_frame = ttk.Frame(block_box)
         state_frame.grid(row=2, column=0, sticky="ew")
         state_frame.columnconfigure(1, weight=1)
-        ttk.Label(state_frame, text="方块状态：").grid(row=0, column=0, sticky="w")
+        ttk.Label(state_frame, text=_label(tr("block.label.state"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.block_state_var = tk.StringVar(value="minecraft:stone")
         self.block_state_entry = ttk.Entry(state_frame, textvariable=self.block_state_var)
         self.block_state_entry.grid(row=0, column=1, sticky="ew")
         self.set_block_button = ttk.Button(
-            state_frame, text="设置方块", command=self._ui_set_block,
+            state_frame, text=tr("button.set_block"), command=self._ui_set_block,
         )
         self.set_block_button.grid(row=0, column=2, padx=(8, 0))
         self.keep_be_var = tk.BooleanVar(value=False)
         self.keep_be_check = ttk.Checkbutton(
-            state_frame, text="保留方块实体", variable=self.keep_be_var,
+            state_frame, text=tr("block.keep_be"), variable=self.keep_be_var,
         )
         self.keep_be_check.grid(row=0, column=3, padx=(8, 0))
 
-        self.chunk_info_var = tk.StringVar(
-            value="（选择坐标后点击“读取方块”可查看区块信息）"
-        )
+        self.chunk_info_var = tk.StringVar(value=tr("block.hint.chunk_info"))
         ttk.Label(
             block_box, textvariable=self.chunk_info_var, anchor="w",
             justify="left", wraplength=1050,
         ).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         # ---- 方块实体 ---------------------------------------------------- #
-        be_box = ttk.LabelFrame(self, text="方块实体（SNBT，高级）", padding=8)
+        be_box = ttk.LabelFrame(self, text=tr("block.be_box"), padding=8)
         be_box.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
         be_box.columnconfigure(0, weight=1)
         be_box.rowconfigure(1, weight=1)
@@ -776,20 +935,20 @@ class BlockTab(_Tab):
         be_bar = ttk.Frame(be_box)
         be_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self.read_be_button = ttk.Button(
-            be_bar, text="读取方块实体", command=self._ui_read_be,
+            be_bar, text=tr("button.read_be"), command=self._ui_read_be,
         )
         self.read_be_button.pack(side="left")
         self.write_be_button = ttk.Button(
-            be_bar, text="写入方块实体", command=self._ui_write_be,
+            be_bar, text=tr("button.write_be"), command=self._ui_write_be,
         )
         self.write_be_button.pack(side="left", padx=(8, 0))
         self.delete_be_button = ttk.Button(
-            be_bar, text="删除方块实体", command=self._ui_delete_be,
+            be_bar, text=tr("button.delete_be"), command=self._ui_delete_be,
         )
         self.delete_be_button.pack(side="left", padx=(8, 0))
         ttk.Label(
             be_bar,
-            text='示例：{id:"minecraft:chest",Items:[]}；写入时自动注入当前 X/Y/Z 坐标。',
+            text=tr("block.hint.be_example"),
             style="Hint.TLabel",
         ).pack(side="left", padx=(10, 0))
 
@@ -809,34 +968,40 @@ class BlockTab(_Tab):
         y: Any = None,
         z: Any = None,
     ) -> tuple[int, int, int]:
-        bx = _parse_int(self.x_var.get() if x is None else x, "X 坐标")
-        by = _parse_int(self.y_var.get() if y is None else y, "Y 坐标")
-        bz = _parse_int(self.z_var.get() if z is None else z, "Z 坐标")
+        bx = _parse_int(self.x_var.get() if x is None else x, tr("field.x_coord"))
+        by = _parse_int(self.y_var.get() if y is None else y, tr("field.y_coord"))
+        bz = _parse_int(self.z_var.get() if z is None else z, tr("field.z_coord"))
         return bx, by, bz
 
     def _on_dimension_changed(self) -> None:
-        self.block_display_var.set("（维度已切换，请重新读取方块）")
-        self.chunk_info_var.set("（维度已切换，请重新读取方块）")
+        self.block_display_var.set(tr("block.dimension_changed"))
+        self.chunk_info_var.set(tr("block.dimension_changed"))
 
     def _refresh_chunk_info(self, x: int, z: int, dimension: str) -> None:
         world = self.app.world
         if world is None:
-            self.chunk_info_var.set("（未打开世界）")
+            self.chunk_info_var.set(tr("common.no_world"))
             return
         cx, cz = x >> 4, z >> 4
         try:
             chunk = world.require_chunk(cx, cz, dimension)
         except Exception as exc:  # noqa: BLE001 - 仅用于展示
-            self.chunk_info_var.set(f"区块 ({cx}, {cz})：{_exc_text(exc)}")
+            self.chunk_info_var.set(
+                tr("block.error.chunk_info", cx=cx, cz=cz, error=_exc_text(exc))
+            )
             return
         summary = chunk.summary()
         lines = [
-            f"区块：({summary['chunk'][0]}, {summary['chunk'][1]})"
-            f"    状态：{summary['status']}"
-            f"    DataVersion：{summary['data_version']}"
-            f"    最低 section Y：{summary['min_section']}"
-            f"    section 数：{summary['sections']}"
-            f"    方块实体数：{summary['block_entities']}",
+            tr(
+                "block.chunk_info",
+                cx=summary["chunk"][0],
+                cz=summary["chunk"][1],
+                status=summary["status"],
+                data_version=summary["data_version"],
+                min_section=summary["min_section"],
+                sections=summary["sections"],
+                block_entities=summary["block_entities"],
+            ),
         ]
         entities: list[str] = []
         for be in chunk.iter_block_entities():
@@ -845,7 +1010,12 @@ class BlockTab(_Tab):
                 f"({be.get_int('x')}, {be.get_int('y')}, {be.get_int('z')})"
             )
         if entities:
-            lines.append("方块实体：" + "；".join(entities))
+            lines.append(
+                tr(
+                    "block.chunk_info.be",
+                    items=tr("common.list_separator_semicolon").join(entities),
+                )
+            )
         self.chunk_info_var.set("\n".join(lines))
 
     def _ui_read_block(self) -> None:
@@ -871,7 +1041,7 @@ class BlockTab(_Tab):
     def set_dimension(self, dim: str) -> None:
         """切换当前维度（overworld / nether / end / namespace:path）。"""
         if dim is None or not str(dim).strip():
-            raise ValueError("维度不能为空")
+            raise ValueError(tr("error.dimension_empty"))
         normalized = World.normalize_dimension(str(dim).strip())
         self.dimension_var.set(normalized)
         self._on_dimension_changed()
@@ -885,8 +1055,8 @@ class BlockTab(_Tab):
         self.dimension_combo["values"] = values
         if self.dimension_var.get().strip() not in values:
             self.dimension_var.set("overworld")
-        self.block_display_var.set("（尚未读取方块）")
-        self.chunk_info_var.set("（选择坐标后点击“读取方块”可查看区块信息）")
+        self.block_display_var.set(tr("block.not_read"))
+        self.chunk_info_var.set(tr("block.hint.chunk_info"))
         _set_text(self.be_editor, "", readonly=False)
 
     def set_coords(self, x: int, y: int, z: int) -> None:
@@ -909,10 +1079,14 @@ class BlockTab(_Tab):
             self._dimension() if dimension is None else dimension
         )
         state = world.get_block(bx, by, bz, dimension=dim)
-        self.block_display_var.set(f"({bx}, {by}, {bz}) [{dim}] = {state}")
+        self.block_display_var.set(
+            tr("block.display.read", x=bx, y=by, z=bz, dim=dim, state=state)
+        )
         self.block_state_var.set(str(state))
         self._refresh_chunk_info(bx, bz, dim)
-        self.app.set_status(f"已读取方块 ({bx}, {by}, {bz}) [{dim}] = {state}")
+        self.app.set_status(
+            tr("status.block_read", x=bx, y=by, z=bz, dim=dim, state=state)
+        )
         return state
 
     def set_block(
@@ -933,7 +1107,9 @@ class BlockTab(_Tab):
         try:
             state = BlockState.parse(str(state_spec))
         except Exception as exc:  # PaletteError 等
-            raise ValueError(f"非法的方块状态 {state_spec!r}：{_exc_text(exc)}") from exc
+            raise ValueError(
+                tr("block.error.invalid_state", value=repr(state_spec), error=_exc_text(exc))
+            ) from exc
 
         change = world.set_block(
             bx, by, bz, state, dimension=dim, keep_block_entity=bool(keep_be)
@@ -942,11 +1118,15 @@ class BlockTab(_Tab):
         world.flush()
         new_backups = list(world.backups[before:])
 
-        self.block_display_var.set(f"已设置 ({bx}, {by}, {bz}) [{dim}]：{change}")
+        self.block_display_var.set(
+            tr("block.display.set", x=bx, y=by, z=bz, dim=dim, change=change)
+        )
         self.block_state_var.set(str(state))
         self._refresh_chunk_info(bx, bz, dim)
         self.app.show_backups(new_backups)
-        self.app.set_status(f"已设置方块 ({bx}, {by}, {bz}) [{dim}]：{change}")
+        self.app.set_status(
+            tr("status.block_set", x=bx, y=by, z=bz, dim=dim, change=change)
+        )
         return change
 
     def read_block_entity(
@@ -967,11 +1147,13 @@ class BlockTab(_Tab):
         self._refresh_chunk_info(bx, bz, dim)
         if be is None:
             _set_text(self.be_editor, "", readonly=False)
-            self.app.set_status(f"({bx}, {by}, {bz}) [{dim}] 没有方块实体")
+            self.app.set_status(
+                tr("status.be_missing", x=bx, y=by, z=bz, dim=dim)
+            )
             return None
         # 读取方块实体时像格式化 JSON 一样输出多行缩进 SNBT，便于阅读/编辑
         _set_text(self.be_editor, to_snbt_pretty(be), readonly=False)
-        self.app.set_status(f"已读取方块实体 ({bx}, {by}, {bz}) [{dim}]")
+        self.app.set_status(tr("status.be_read", x=bx, y=by, z=bz, dim=dim))
         return be
 
     def write_block_entity(
@@ -990,15 +1172,15 @@ class BlockTab(_Tab):
         )
         text = str(snbt or "").strip()
         if not text:
-            raise ValueError("方块实体 SNBT 不能为空")
+            raise ValueError(tr("block.error.snbt_empty"))
         try:
             tag = parse_snbt(text)
         except Exception as exc:
-            raise ValueError(f"方块实体 SNBT 解析失败：{_exc_text(exc)}") from exc
-        if not isinstance(tag, CompoundTag):
             raise ValueError(
-                '方块实体必须是一个 compound SNBT，例如 {id:"minecraft:chest",Items:[]}'
-            )
+                tr("block.error.snbt_parse", error=_exc_text(exc))
+            ) from exc
+        if not isinstance(tag, CompoundTag):
+            raise ValueError(tr("block.error.snbt_compound"))
         tag["x"] = Int(bx)
         tag["y"] = Int(by)
         tag["z"] = Int(bz)
@@ -1007,7 +1189,9 @@ class BlockTab(_Tab):
         try:
             chunk.set_block_entity(tag)
         except Exception as exc:
-            raise WorldError(f"写入方块实体失败：{_exc_text(exc)}") from exc
+            raise WorldError(
+                tr("block.error.write_be_failed", error=_exc_text(exc))
+            ) from exc
         world.mark_chunk_dirty(chunk, dim)
 
         before = len(world.backups)
@@ -1017,7 +1201,7 @@ class BlockTab(_Tab):
         self._refresh_chunk_info(bx, bz, dim)
         _set_text(self.be_editor, to_snbt_pretty(tag), readonly=False)
         self.app.show_backups(new_backups)
-        self.app.set_status(f"已写入方块实体 ({bx}, {by}, {bz}) [{dim}]")
+        self.app.set_status(tr("status.be_written", x=bx, y=by, z=bz, dim=dim))
 
     def delete_block_entity(
         self,
@@ -1034,7 +1218,7 @@ class BlockTab(_Tab):
         )
         chunk = world.require_chunk(bx >> 4, bz >> 4, dim)
         if not chunk.delete_block_entity(bx, by, bz):
-            raise WorldError(f"({bx}, {by}, {bz}) [{dim}] 没有方块实体可删除")
+            raise WorldError(tr("block.error.no_be_delete", x=bx, y=by, z=bz, dim=dim))
         world.mark_chunk_dirty(chunk, dim)
 
         before = len(world.backups)
@@ -1044,7 +1228,7 @@ class BlockTab(_Tab):
         _set_text(self.be_editor, "", readonly=False)
         self._refresh_chunk_info(bx, bz, dim)
         self.app.show_backups(new_backups)
-        self.app.set_status(f"已删除方块实体 ({bx}, {by}, {bz}) [{dim}]")
+        self.app.set_status(tr("status.be_deleted", x=bx, y=by, z=bz, dim=dim))
 
 
 # --------------------------------------------------------------------------- #
@@ -1057,7 +1241,7 @@ class BlockSearchTab(_Tab):
     结果列表最多显示 DISPLAY_LIMIT=256 个坐标。
     """
 
-    title = "方块搜索"
+    title_key = "tab.search"
 
     def _build(self) -> None:
         self._running = False
@@ -1074,30 +1258,34 @@ class BlockSearchTab(_Tab):
         # ---- 搜索条件 ---------------------------------------------------- #
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(bar, text="维度：").pack(side="left")
+        ttk.Label(bar, text=_label(tr("label.dimension"))).pack(side="left")
         self.dimension_var = tk.StringVar(value="overworld")
         self.dimension_combo = ttk.Combobox(
             bar, textvariable=self.dimension_var, values=["overworld"], width=20,
         )
         self.dimension_combo.pack(side="left")
-        ttk.Label(bar, text="  方块注册名：").pack(side="left")
+        ttk.Label(bar, text=_label(tr("search.label.block_id"))).pack(
+            side="left", padx=(12, 0)
+        )
         self.block_var = tk.StringVar(value="minecraft:chest")
         self.block_entry = ttk.Entry(bar, textvariable=self.block_var, width=30)
         self.block_entry.pack(side="left")
         self.search_button = ttk.Button(
-            bar, text="开始查找", style="Accent.TButton", command=self._ui_start,
+            bar, text=tr("button.start_search"), style="Accent.TButton", command=self._ui_start,
         )
         self.search_button.pack(side="left", padx=(8, 0))
         self.stop_button = ttk.Button(
-            bar, text="停止", command=self._ui_stop, state="disabled",
+            bar, text=tr("button.stop"), command=self._ui_stop, state="disabled",
         )
         self.stop_button.pack(side="left", padx=(6, 0))
 
         ttk.Label(
             self,
-            text=f"扫描当前维度全部已生成区块；最多统计 {SHORT_MAX} 个匹配，"
-                 f"列表最多显示 {DISPLAY_LIMIT} 个坐标。"
-                 "支持 minecraft:oak_log[axis=x] 形式的精确状态过滤。",
+            text=tr(
+                "search.hint.scan",
+                max_matches=SHORT_MAX,
+                display_limit=DISPLAY_LIMIT,
+            ),
             style="Hint.TLabel",
             wraplength=1080,
         ).grid(row=1, column=0, sticky="w", pady=(6, 4))
@@ -1110,19 +1298,20 @@ class BlockSearchTab(_Tab):
             progress_row, orient="horizontal", mode="determinate", maximum=1, value=0,
         )
         self.progress.grid(row=0, column=0, sticky="ew")
-        self.status_var = tk.StringVar(value="就绪：选择维度、输入方块注册名后点击“开始查找”")
+        self.status_var = tk.StringVar(value=tr("search.status.ready_initial"))
         ttk.Label(
             progress_row, textvariable=self.status_var, anchor="w", style="Hint.TLabel",
             wraplength=1080,
         ).grid(row=1, column=0, sticky="w", pady=(4, 6))
 
         # ---- 结果表 ------------------------------------------------------ #
-        result_box = ttk.LabelFrame(self, text="匹配结果（双击行可定位并读取该方块）", padding=6)
+        result_box = ttk.LabelFrame(self, text=tr("search.result_box"), padding=6)
         result_box.grid(row=3, column=0, sticky="nsew")
         result_box.columnconfigure(0, weight=1)
         result_box.rowconfigure(0, weight=1)
         columns = ("index", "x", "y", "z", "state")
-        headings = {"index": "#", "x": "X", "y": "Y", "z": "Z", "state": "方块状态"}
+        headings = {"index": "#", "x": "X", "y": "Y", "z": "Z",
+                    "state": tr("search.heading.state")}
         widths = {"index": 60, "x": 110, "y": 110, "z": 110, "state": 620}
         self.tree = ttk.Treeview(
             result_box, columns=columns, show="headings", height=10, selectmode="browse",
@@ -1140,12 +1329,12 @@ class BlockSearchTab(_Tab):
         bottom = ttk.Frame(result_box)
         bottom.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(
-            bottom, text="定位并读取选中方块", command=self._on_read_selected,
+            bottom, text=tr("button.locate_block"), command=self._on_read_selected,
         ).pack(side="left")
-        ttk.Button(bottom, text="清空结果", command=self._clear_results).pack(
+        ttk.Button(bottom, text=tr("button.clear_results"), command=self._clear_results).pack(
             side="left", padx=(8, 0)
         )
-        self.result_var = tk.StringVar(value="尚无结果")
+        self.result_var = tk.StringVar(value=tr("common.no_results"))
         ttk.Label(bottom, textvariable=self.result_var, style="Hint.TLabel").pack(
             side="left", padx=(14, 0)
         )
@@ -1157,7 +1346,7 @@ class BlockSearchTab(_Tab):
             if self._running:
                 self._cancel_event.set()
             self.dimension_combo["values"] = ["overworld"]
-            self.status_var.set("（未打开世界）")
+            self.status_var.set(tr("common.no_world"))
             self.search_button.configure(state="disabled")
             return
         if self._running and self._search_world_path not in (None, world.path):
@@ -1171,7 +1360,7 @@ class BlockSearchTab(_Tab):
         self.search_button.configure(state="disabled" if self._running else "normal")
         if not self._running:
             self.status_var.set(
-                f"就绪：维度 {self.dimension_var.get()}，输入方块注册名后点击“开始查找”"
+                tr("search.status.ready", dim=self.dimension_var.get())
             )
 
     # ---- 搜索 ------------------------------------------------------------ #
@@ -1179,15 +1368,15 @@ class BlockSearchTab(_Tab):
                      dimension: Optional[str] = None) -> None:
         world = self.require_world()
         if self._running:
-            raise RuntimeError("已有搜索正在进行，请等待完成或点击“停止”。")
+            raise RuntimeError(tr("error.search_running"))
         spec = str(block_spec if block_spec is not None else self.block_var.get()).strip()
         if not spec:
-            raise ValueError("请填写方块注册名，例如 minecraft:chest")
+            raise ValueError(tr("search.error.block_id_empty"))
         # 提前解析以校验语法（不要求方块一定存在）
         BlockState.parse(spec)
         dim = World.normalize_dimension(dimension or self.dimension_var.get())
         if dim not in world.list_dimensions():
-            raise ValueError(f"维度不存在或无 region：{dim}")
+            raise ValueError(tr("error.dimension_missing", dim=dim))
 
         self._running = True
         self._search_world_path = world.path
@@ -1197,11 +1386,13 @@ class BlockSearchTab(_Tab):
         self.progress.configure(maximum=1, value=0)
         self.tree.delete(*self.tree.get_children())
         self._last_result = None
-        self.result_var.set("搜索中...")
+        self.result_var.set(tr("search.status.searching"))
         self.search_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.status_var.set(f"正在扫描维度 {dim} 的区块，查找 {spec} ...")
-        self.app.set_status(f"方块搜索：{spec} @ {dim}")
+        self.status_var.set(
+            tr("search.status.scanning", dim=dim, spec=spec)
+        )
+        self.app.set_status(tr("status.block_search", spec=spec, dim=dim))
 
         self.block_var.set(spec)
         self.dimension_var.set(dim)
@@ -1223,7 +1414,7 @@ class BlockSearchTab(_Tab):
         if not self._running:
             return
         self._cancel_event.set()
-        self.status_var.set("正在停止搜索...")
+        self.status_var.set(tr("status.stopping_search"))
         self.stop_button.configure(state="disabled")
 
     def _worker_progress(self, scanned: int, total: int, found: int) -> None:
@@ -1240,8 +1431,13 @@ class BlockSearchTab(_Tab):
             self.progress.configure(maximum=total)
             self.progress.configure(value=min(scanned, total))
         self.status_var.set(
-            f"正在扫描 {scanned}/{total if total else '?'} 个区块，"
-            f"已找到 {found} 个匹配（最多统计 {SHORT_MAX} 个）..."
+            tr(
+                "search.status.progress",
+                scanned=scanned,
+                total=total if total else "?",
+                found=found,
+                max_matches=SHORT_MAX,
+            )
         )
         try:
             self._poll_after = self.after(150, self._poll_progress)
@@ -1261,8 +1457,10 @@ class BlockSearchTab(_Tab):
 
         if isinstance(payload, BaseException):
             self.progress.configure(value=0)
-            self.status_var.set(f"搜索失败：{_exc_text(payload)}")
-            self.app.show_error("方块搜索失败", payload)
+            self.status_var.set(
+                tr("search.status.failed", error=_exc_text(payload))
+            )
+            self.app.show_error(tr("dialog.error.block_search.title"), payload)
             return
 
         result = payload
@@ -1279,28 +1477,41 @@ class BlockSearchTab(_Tab):
             )
         shown = len(result.matches)
         if result.cancelled:
-            status = (
-                f"已取消：找到 {result.total_found} 个匹配"
-                f"（扫描 {result.chunks_scanned}/{result.chunks_total} 个区块，"
-                f"耗时 {result.elapsed:.1f}s）"
+            status = tr(
+                "search.status.cancelled",
+                total_found=result.total_found,
+                scanned=result.chunks_scanned,
+                total=result.chunks_total,
+                elapsed=result.elapsed,
             )
         elif result.truncated:
-            status = (
-                f"已达到读取上限 {SHORT_MAX}，停止扫描；找到 {result.total_found} 个，"
-                f"显示前 {shown} 个（耗时 {result.elapsed:.1f}s）"
+            status = tr(
+                "search.status.truncated",
+                max_matches=SHORT_MAX,
+                total_found=result.total_found,
+                shown=shown,
+                elapsed=result.elapsed,
             )
         else:
-            status = (
-                f"完成：找到 {result.total_found} 个匹配，显示前 {shown} 个"
-                f"（扫描 {result.chunks_scanned}/{result.chunks_total} 个区块，"
-                f"耗时 {result.elapsed:.1f}s）"
+            status = tr(
+                "search.status.done",
+                total_found=result.total_found,
+                shown=shown,
+                scanned=result.chunks_scanned,
+                total=result.chunks_total,
+                elapsed=result.elapsed,
             )
         if result.errors:
-            status += f"；{len(result.errors)} 个区块读取失败"
+            status += tr("search.status.chunk_errors", count=len(result.errors))
         self.status_var.set(status)
         self.result_var.set(
-            f"维度 {result.dimension}，方块 {result.block}，"
-            f"匹配 {result.total_found} 个，显示 {shown} 个"
+            tr(
+                "search.result_summary",
+                dim=result.dimension,
+                block=result.block,
+                total_found=result.total_found,
+                shown=shown,
+            )
         )
         self.app.set_status(status)
 
@@ -1314,7 +1525,7 @@ class BlockSearchTab(_Tab):
     def _on_read_selected(self) -> None:
         selection = self.tree.selection()
         if not selection:
-            self.app.set_status("请先在结果列表中选择一行")
+            self.app.set_status(tr("status.select_row"))
             return
         values = self.tree.item(selection[0], "values")
         if len(values) < 4:
@@ -1332,16 +1543,18 @@ class BlockSearchTab(_Tab):
         try:
             block_tab.read_block()
             state = block_tab.block_display_var.get()
-            self.app.set_status(f"已定位 ({x}, {y}, {z}) [{dimension}] = {state}")
+            self.app.set_status(
+                tr("status.located_block", x=x, y=y, z=z, dim=dimension, state=state)
+            )
         except Exception as exc:  # noqa: BLE001 - UI 边界
-            self.app.show_error("读取选中方块失败", exc)
+            self.app.show_error(tr("dialog.error.read_selected_block.title"), exc)
 
     def _clear_results(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self._last_result = None
-        self.result_var.set("尚无结果")
+        self.result_var.set(tr("common.no_results"))
         self.progress.configure(value=0)
-        self.status_var.set("已清空结果")
+        self.status_var.set(tr("status.results_cleared"))
 
     # ---- UI 回调 --------------------------------------------------------- #
     def _ui_start(self) -> None:
@@ -1361,7 +1574,7 @@ class BlockEntitySearchTab(_Tab):
     结果列表最多显示 DISPLAY_LIMIT=256 个坐标。
     """
 
-    title = "方块实体搜索"
+    title_key = "tab.be_search"
 
     def _build(self) -> None:
         self._running = False
@@ -1377,30 +1590,34 @@ class BlockEntitySearchTab(_Tab):
 
         bar = ttk.Frame(self)
         bar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(bar, text="维度：").pack(side="left")
+        ttk.Label(bar, text=_label(tr("label.dimension"))).pack(side="left")
         self.dimension_var = tk.StringVar(value="overworld")
         self.dimension_combo = ttk.Combobox(
             bar, textvariable=self.dimension_var, values=["overworld"], width=20,
         )
         self.dimension_combo.pack(side="left")
-        ttk.Label(bar, text="  方块实体类型：").pack(side="left")
+        ttk.Label(bar, text=_label(tr("be_search.label.type"))).pack(
+            side="left", padx=(12, 0)
+        )
         self.be_var = tk.StringVar(value="minecraft:chest")
         self.be_entry = ttk.Entry(bar, textvariable=self.be_var, width=30)
         self.be_entry.pack(side="left")
         self.search_button = ttk.Button(
-            bar, text="开始查找", style="Accent.TButton", command=self._ui_start,
+            bar, text=tr("button.start_search"), style="Accent.TButton", command=self._ui_start,
         )
         self.search_button.pack(side="left", padx=(8, 0))
         self.stop_button = ttk.Button(
-            bar, text="停止", command=self._ui_stop, state="disabled",
+            bar, text=tr("button.stop"), command=self._ui_stop, state="disabled",
         )
         self.stop_button.pack(side="left", padx=(6, 0))
 
         ttk.Label(
             self,
-            text=f"扫描当前维度全部已生成区块的 block_entities；最多统计 {SHORT_MAX} 个匹配，"
-                 f"列表最多显示 {DISPLAY_LIMIT} 个坐标。类型以方块实体 NBT 的 id 为准，"
-                 "不要用方块 id 推断（例如 trapped_chest 的方块实体是 minecraft:chest）。",
+            text=tr(
+                "be_search.hint.scan",
+                max_matches=SHORT_MAX,
+                display_limit=DISPLAY_LIMIT,
+            ),
             style="Hint.TLabel",
             wraplength=1080,
         ).grid(row=1, column=0, sticky="w", pady=(6, 4))
@@ -1412,20 +1629,21 @@ class BlockEntitySearchTab(_Tab):
             progress_row, orient="horizontal", mode="determinate", maximum=1, value=0,
         )
         self.progress.grid(row=0, column=0, sticky="ew")
-        self.status_var = tk.StringVar(value="就绪：选择维度、输入方块实体类型后点击“开始查找”")
+        self.status_var = tk.StringVar(value=tr("be_search.status.ready_initial"))
         ttk.Label(
             progress_row, textvariable=self.status_var, anchor="w", style="Hint.TLabel",
             wraplength=1080,
         ).grid(row=1, column=0, sticky="w", pady=(4, 6))
 
         result_box = ttk.LabelFrame(
-            self, text="匹配结果（双击行可定位并读取该方块实体）", padding=6,
+            self, text=tr("be_search.result_box"), padding=6,
         )
         result_box.grid(row=3, column=0, sticky="nsew")
         result_box.columnconfigure(0, weight=1)
         result_box.rowconfigure(0, weight=1)
         columns = ("index", "x", "y", "z", "type")
-        headings = {"index": "#", "x": "X", "y": "Y", "z": "Z", "type": "方块实体类型"}
+        headings = {"index": "#", "x": "X", "y": "Y", "z": "Z",
+                    "type": tr("be_search.heading.type")}
         widths = {"index": 60, "x": 110, "y": 110, "z": 110, "type": 520}
         self.tree = ttk.Treeview(
             result_box, columns=columns, show="headings", height=10, selectmode="browse",
@@ -1443,12 +1661,12 @@ class BlockEntitySearchTab(_Tab):
         bottom = ttk.Frame(result_box)
         bottom.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(
-            bottom, text="定位并读取选中方块实体", command=self._on_read_selected,
+            bottom, text=tr("button.locate_be"), command=self._on_read_selected,
         ).pack(side="left")
-        ttk.Button(bottom, text="清空结果", command=self._clear_results).pack(
+        ttk.Button(bottom, text=tr("button.clear_results"), command=self._clear_results).pack(
             side="left", padx=(8, 0)
         )
-        self.result_var = tk.StringVar(value="尚无结果")
+        self.result_var = tk.StringVar(value=tr("common.no_results"))
         ttk.Label(bottom, textvariable=self.result_var, style="Hint.TLabel").pack(
             side="left", padx=(14, 0)
         )
@@ -1460,7 +1678,7 @@ class BlockEntitySearchTab(_Tab):
             if self._running:
                 self._cancel_event.set()
             self.dimension_combo["values"] = ["overworld"]
-            self.status_var.set("（未打开世界）")
+            self.status_var.set(tr("common.no_world"))
             self.search_button.configure(state="disabled")
             return
         if self._running and self._search_world_path not in (None, world.path):
@@ -1473,8 +1691,7 @@ class BlockEntitySearchTab(_Tab):
         self.search_button.configure(state="disabled" if self._running else "normal")
         if not self._running:
             self.status_var.set(
-                f"就绪：维度 {self.dimension_var.get()}，"
-                "输入方块实体类型后点击“开始查找”"
+                tr("be_search.status.ready", dim=self.dimension_var.get())
             )
 
     # ---- 搜索 ------------------------------------------------------------ #
@@ -1482,14 +1699,14 @@ class BlockEntitySearchTab(_Tab):
                      dimension: Optional[str] = None) -> None:
         world = self.require_world()
         if self._running:
-            raise RuntimeError("已有搜索正在进行，请等待完成或点击“停止”。")
+            raise RuntimeError(tr("error.search_running"))
         spec = str(be_spec if be_spec is not None else self.be_var.get()).strip()
         if not spec:
-            raise ValueError("请填写方块实体类型，例如 minecraft:chest")
+            raise ValueError(tr("be_search.error.type_empty"))
         target = normalize_block_entity_id(spec)
         dim = World.normalize_dimension(dimension or self.dimension_var.get())
         if dim not in world.list_dimensions():
-            raise ValueError(f"维度不存在或无 region：{dim}")
+            raise ValueError(tr("error.dimension_missing", dim=dim))
 
         self._running = True
         self._search_world_path = world.path
@@ -1499,11 +1716,13 @@ class BlockEntitySearchTab(_Tab):
         self.progress.configure(maximum=1, value=0)
         self.tree.delete(*self.tree.get_children())
         self._last_result = None
-        self.result_var.set("搜索中...")
+        self.result_var.set(tr("search.status.searching"))
         self.search_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.status_var.set(f"正在扫描维度 {dim} 的区块，查找方块实体 {target} ...")
-        self.app.set_status(f"方块实体搜索：{target} @ {dim}")
+        self.status_var.set(
+            tr("be_search.status.scanning", dim=dim, target=target)
+        )
+        self.app.set_status(tr("status.be_search", spec=target, dim=dim))
 
         self.be_var.set(target)
         self.dimension_var.set(dim)
@@ -1525,7 +1744,7 @@ class BlockEntitySearchTab(_Tab):
         if not self._running:
             return
         self._cancel_event.set()
-        self.status_var.set("正在停止搜索...")
+        self.status_var.set(tr("status.stopping_search"))
         self.stop_button.configure(state="disabled")
 
     def _worker_progress(self, scanned: int, total: int, found: int) -> None:
@@ -1542,8 +1761,13 @@ class BlockEntitySearchTab(_Tab):
             self.progress.configure(maximum=total)
             self.progress.configure(value=min(scanned, total))
         self.status_var.set(
-            f"正在扫描 {scanned}/{total if total else '?'} 个区块，"
-            f"已找到 {found} 个匹配（最多统计 {SHORT_MAX} 个）..."
+            tr(
+                "search.status.progress",
+                scanned=scanned,
+                total=total if total else "?",
+                found=found,
+                max_matches=SHORT_MAX,
+            )
         )
         try:
             self._poll_after = self.after(150, self._poll_progress)
@@ -1563,8 +1787,10 @@ class BlockEntitySearchTab(_Tab):
 
         if isinstance(payload, BaseException):
             self.progress.configure(value=0)
-            self.status_var.set(f"搜索失败：{_exc_text(payload)}")
-            self.app.show_error("方块实体搜索失败", payload)
+            self.status_var.set(
+                tr("search.status.failed", error=_exc_text(payload))
+            )
+            self.app.show_error(tr("dialog.error.be_search.title"), payload)
             return
 
         result = payload
@@ -1581,28 +1807,41 @@ class BlockEntitySearchTab(_Tab):
             )
         shown = len(result.matches)
         if result.cancelled:
-            status = (
-                f"已取消：找到 {result.total_found} 个匹配"
-                f"（扫描 {result.chunks_scanned}/{result.chunks_total} 个区块，"
-                f"耗时 {result.elapsed:.1f}s）"
+            status = tr(
+                "search.status.cancelled",
+                total_found=result.total_found,
+                scanned=result.chunks_scanned,
+                total=result.chunks_total,
+                elapsed=result.elapsed,
             )
         elif result.truncated:
-            status = (
-                f"已达到读取上限 {SHORT_MAX}，停止扫描；找到 {result.total_found} 个，"
-                f"显示前 {shown} 个（耗时 {result.elapsed:.1f}s）"
+            status = tr(
+                "search.status.truncated",
+                max_matches=SHORT_MAX,
+                total_found=result.total_found,
+                shown=shown,
+                elapsed=result.elapsed,
             )
         else:
-            status = (
-                f"完成：找到 {result.total_found} 个匹配，显示前 {shown} 个"
-                f"（扫描 {result.chunks_scanned}/{result.chunks_total} 个区块，"
-                f"耗时 {result.elapsed:.1f}s）"
+            status = tr(
+                "search.status.done",
+                total_found=result.total_found,
+                shown=shown,
+                scanned=result.chunks_scanned,
+                total=result.chunks_total,
+                elapsed=result.elapsed,
             )
         if result.errors:
-            status += f"；{len(result.errors)} 个区块读取失败"
+            status += tr("search.status.chunk_errors", count=len(result.errors))
         self.status_var.set(status)
         self.result_var.set(
-            f"维度 {result.dimension}，方块实体 {result.block_entity}，"
-            f"匹配 {result.total_found} 个，显示 {shown} 个"
+            tr(
+                "be_search.result_summary",
+                dim=result.dimension,
+                block_entity=result.block_entity,
+                total_found=result.total_found,
+                shown=shown,
+            )
         )
         self.app.set_status(status)
 
@@ -1616,7 +1855,7 @@ class BlockEntitySearchTab(_Tab):
     def _on_read_selected(self) -> None:
         selection = self.tree.selection()
         if not selection:
-            self.app.set_status("请先在结果列表中选择一行")
+            self.app.set_status(tr("status.select_row"))
             return
         values = self.tree.item(selection[0], "values")
         if len(values) < 4:
@@ -1634,15 +1873,15 @@ class BlockEntitySearchTab(_Tab):
         try:
             block_tab.read_block_entity()
             self.app.set_status(
-                f"已定位方块实体 ({x}, {y}, {z}) [{dimension}]，请在方块实体编辑器中查看"
+                tr("status.located_be", x=x, y=y, z=z, dim=dimension)
             )
         except Exception as exc:  # noqa: BLE001 - UI 边界
-            self.app.show_error("读取选中方块实体失败", exc)
+            self.app.show_error(tr("dialog.error.read_selected_be.title"), exc)
 
     def _clear_results(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self._last_result = None
-        self.result_var.set("尚无结果")
+        self.result_var.set(tr("common.no_results"))
 
     # ---- UI 回调 --------------------------------------------------------- #
     def _ui_start(self) -> None:
@@ -1658,7 +1897,7 @@ class BlockEntitySearchTab(_Tab):
 class PlayerTab(_Tab):
     """玩家列表与属性编辑。"""
 
-    title = "玩家数据"
+    title_key = "tab.player"
 
     def _build(self) -> None:
         self.current_player: Optional[PlayerData] = None
@@ -1676,8 +1915,11 @@ class PlayerTab(_Tab):
         tree_frame.rowconfigure(0, weight=1)
         columns = ("uuid", "dimension", "game_type", "health", "food", "xp_level", "position")
         headings = {
-            "uuid": "UUID", "dimension": "维度", "game_type": "模式",
-            "health": "HP", "food": "饥饿", "xp_level": "XP 等级", "position": "位置",
+            "uuid": "UUID", "dimension": tr("player.heading.dimension"),
+            "game_type": tr("player.heading.game_type"),
+            "health": "HP", "food": tr("player.heading.food"),
+            "xp_level": tr("player.heading.xp_level"),
+            "position": tr("player.heading.position"),
         }
         widths = {"uuid": 290, "dimension": 150, "game_type": 110, "health": 70,
                   "food": 60, "xp_level": 80, "position": 170}
@@ -1699,19 +1941,20 @@ class PlayerTab(_Tab):
         hint_bar = ttk.Frame(self)
         hint_bar.grid(row=1, column=0, sticky="ew", pady=(6, 8))
         hint_bar.columnconfigure(0, weight=1)
-        self.player_hint_var = tk.StringVar(value="（未打开世界）")
+        self.player_hint_var = tk.StringVar(value=tr("common.no_world"))
         self.player_hint_label = ttk.Label(
             hint_bar, textvariable=self.player_hint_var, anchor="w", style="Hint.TLabel",
             wraplength=1000,
         )
         self.player_hint_label.grid(row=0, column=0, sticky="w")
         self.refresh_players_button = ttk.Button(
-            hint_bar, text="刷新玩家列表", command=lambda: self._run_ui(self.refresh_players),
+            hint_bar, text=tr("button.refresh_players"),
+            command=lambda: self._run_ui(self.refresh_players),
         )
         self.refresh_players_button.grid(row=0, column=1)
 
         # ---- 属性编辑 ---------------------------------------------------- #
-        edit_box = ttk.LabelFrame(self, text="玩家属性（选中玩家后可修改）", padding=8)
+        edit_box = ttk.LabelFrame(self, text=tr("player.edit_box"), padding=8)
         edit_box.grid(row=2, column=0, sticky="nsew")
         edit_box.columnconfigure(1, weight=1)
         edit_box.columnconfigure(3, weight=1)
@@ -1733,7 +1976,7 @@ class PlayerTab(_Tab):
 
         def add_field(row: int, column: int, label: str, var: tk.StringVar,
                       width: int = 12) -> ttk.Entry:
-            ttk.Label(edit_box, text=f"{label}：").grid(
+            ttk.Label(edit_box, text=_label(label)).grid(
                 row=row, column=column * 2, sticky="w", pady=3
             )
             entry = ttk.Entry(edit_box, textvariable=var, width=width)
@@ -1741,32 +1984,52 @@ class PlayerTab(_Tab):
             return entry
 
         self.player_entries: dict[str, ttk.Entry] = {}
-        self.player_entries["health"] = add_field(0, 0, "生命值 Health", self.health_var)
-        self.player_entries["food"] = add_field(0, 1, "饥饿值 foodLevel", self.food_var)
-        self.player_entries["saturation"] = add_field(
-            0, 2, "饱和度 foodSaturationLevel", self.saturation_var, width=14
+        self.player_entries["health"] = add_field(
+            0, 0, tr("field.health"), self.health_var,
         )
-        self.player_entries["xp_level"] = add_field(1, 0, "经验等级 XpLevel", self.xp_level_var)
-        self.player_entries["xp_progress"] = add_field(1, 1, "经验进度 XpP (0≤x<1)", self.xp_progress_var, width=14)
-        self.player_entries["xp_total"] = add_field(1, 2, "总经验 XpTotal", self.xp_total_var)
-        self.player_entries["pos_x"] = add_field(2, 0, "位置 X", self.pos_x_var)
-        self.player_entries["pos_y"] = add_field(2, 1, "位置 Y", self.pos_y_var)
-        self.player_entries["pos_z"] = add_field(2, 2, "位置 Z", self.pos_z_var)
+        self.player_entries["food"] = add_field(
+            0, 1, tr("field.food"), self.food_var,
+        )
+        self.player_entries["saturation"] = add_field(
+            0, 2, tr("field.saturation"), self.saturation_var, width=14
+        )
+        self.player_entries["xp_level"] = add_field(
+            1, 0, tr("field.xp_level"), self.xp_level_var,
+        )
+        self.player_entries["xp_progress"] = add_field(
+            1, 1, tr("player.label.xp_progress"), self.xp_progress_var, width=14
+        )
+        self.player_entries["xp_total"] = add_field(
+            1, 2, tr("field.xp_total"), self.xp_total_var,
+        )
+        self.player_entries["pos_x"] = add_field(
+            2, 0, tr("field.pos_x"), self.pos_x_var,
+        )
+        self.player_entries["pos_y"] = add_field(
+            2, 1, tr("field.pos_y"), self.pos_y_var,
+        )
+        self.player_entries["pos_z"] = add_field(
+            2, 2, tr("field.pos_z"), self.pos_z_var,
+        )
 
-        ttk.Label(edit_box, text="游戏模式：").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(edit_box, text=_label(tr("player.label.game_type"))).grid(
+            row=3, column=0, sticky="w", pady=3
+        )
         self.player_gametype_combo = ttk.Combobox(
             edit_box, textvariable=self.player_gametype_var, values=GAME_TYPE_CHOICES,
             state="readonly", width=12,
         )
         self.player_gametype_combo.grid(row=3, column=1, sticky="w", pady=3)
-        ttk.Label(edit_box, text="维度：").grid(row=3, column=2, sticky="e", padx=(12, 6), pady=3)
+        ttk.Label(edit_box, text=_label(tr("label.dimension"))).grid(
+            row=3, column=2, sticky="e", padx=(12, 6), pady=3
+        )
         self.player_dimension_combo = ttk.Combobox(
             edit_box, textvariable=self.player_dimension_var,
             values=PLAYER_DIMENSION_CHOICES, state="readonly", width=14,
         )
         self.player_dimension_combo.grid(row=3, column=3, sticky="w", pady=3)
 
-        self.player_current_var = tk.StringVar(value="当前玩家：—")
+        self.player_current_var = tk.StringVar(value=tr("player.current_none"))
         ttk.Label(
             edit_box, textvariable=self.player_current_var, anchor="w", style="Hint.TLabel",
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
@@ -1774,15 +2037,16 @@ class PlayerTab(_Tab):
         button_row = ttk.Frame(edit_box)
         button_row.grid(row=5, column=0, columnspan=6, sticky="w", pady=(8, 0))
         self.apply_player_button = ttk.Button(
-            button_row, text="应用修改", style="Accent.TButton", command=self._ui_apply,
+            button_row, text=tr("button.apply_player"), style="Accent.TButton",
+            command=self._ui_apply,
         )
         self.apply_player_button.pack(side="left")
         self.heal_button = ttk.Button(
-            button_row, text="回满血", command=self._ui_heal,
+            button_row, text=tr("button.heal"), command=self._ui_heal,
         )
         self.heal_button.pack(side="left", padx=(8, 0))
         self.inventory_button = ttk.Button(
-            button_row, text="编辑物品栏...", command=self._ui_inventory,
+            button_row, text=tr("button.edit_inventory"), command=self._ui_inventory,
         )
         self.inventory_button.pack(side="left", padx=(8, 0))
 
@@ -1802,7 +2066,7 @@ class PlayerTab(_Tab):
         try:
             self.select_player(selected_uuid)
         except Exception as exc:  # noqa: BLE001 - UI 事件边界
-            self.app.show_error("加载玩家失败", exc)
+            self.app.show_error(tr("dialog.error.load_player.title"), exc)
 
     def _ui_apply(self) -> None:
         self._run_ui(self.apply_player_edits)
@@ -1814,7 +2078,7 @@ class PlayerTab(_Tab):
         """打开当前玩家的物品栏编辑对话框。"""
         player = self.current_player
         if player is None:
-            self.app.set_status("请先在玩家列表中选择一个玩家")
+            self.app.set_status(tr("player.status.select_first"))
             return
         dialog = self._inventory_dialog
         if dialog is not None:
@@ -1829,7 +2093,7 @@ class PlayerTab(_Tab):
         try:
             self._inventory_dialog = InventoryEditorDialog(self, self.app, player)
         except Exception as exc:  # noqa: BLE001 - UI 边界
-            self.app.show_error("打开物品栏失败", exc)
+            self.app.show_error(tr("dialog.error.open_inventory.title"), exc)
 
     def _clear_fields(self) -> None:
         for var in (
@@ -1840,7 +2104,7 @@ class PlayerTab(_Tab):
             var.set("")
         self.player_gametype_var.set(GAME_TYPE_CHOICES[0])
         self.player_dimension_var.set("overworld")
-        self.player_current_var.set("当前玩家：—")
+        self.player_current_var.set(tr("player.current_none"))
 
     def _sync_tree_selection(self) -> None:
         if self.current_uuid and self.tree.exists(self.current_uuid):
@@ -1866,7 +2130,7 @@ class PlayerTab(_Tab):
             self.current_uuid = None
             self._clear_fields()
             if world is None:
-                self.player_hint_var.set("（未打开世界）")
+                self.player_hint_var.set(tr("common.no_world"))
                 return
             players = world.list_players()
             loaded = 0
@@ -1902,17 +2166,19 @@ class PlayerTab(_Tab):
                     ),
                 )
                 loaded += 1
-            hints = [f"共 {loaded} 个玩家"]
+            hints = [tr("player.hint.total_players", count=loaded)]
             if broken:
-                hints.append(f"{broken} 个文件读取失败")
+                hints.append(tr("player.hint.broken_files", count=broken))
             if loaded == 0:
-                hints.append("未找到玩家数据（playerdata 目录为空）")
+                hints.append(tr("player.hint.no_players"))
             warning = getattr(world, "host_player_warning", None)
             if warning:
-                hints.append(f"警告：{warning}")
+                hints.append(tr("player.hint.warning", warning=warning))
             elif getattr(world, "host_player_uuid", None):
-                hints.append("单人主机：玩家修改会同步到 level.dat 的 Player 快照")
-            self.player_hint_var.set("；".join(hints))
+                hints.append(tr("player.hint.host_player"))
+            self.player_hint_var.set(
+                tr("common.list_separator_semicolon").join(hints)
+            )
         finally:
             self._suppress_select = False
 
@@ -1921,7 +2187,7 @@ class PlayerTab(_Tab):
         world = self.require_world()
         text = str(uuid).strip()
         if not text:
-            raise ValueError("玩家 UUID 不能为空")
+            raise ValueError(tr("player.error.uuid_empty"))
         player = world.get_player(text)
         self.current_player = player
         self.current_uuid = player.uuid
@@ -1950,45 +2216,65 @@ class PlayerTab(_Tab):
         self.player_dimension_combo["values"] = values
         self.player_dimension_var.set(dimension)
         self.player_current_var.set(
-            f"当前玩家：{player.uuid}（{os.path.basename(player.path)}）"
+            tr(
+                "player.current",
+                uuid=player.uuid,
+                filename=os.path.basename(player.path),
+            )
         )
         self._sync_tree_selection()
-        self.app.set_status(f"已加载玩家 {player.uuid}")
+        self.app.set_status(tr("status.player_loaded", uuid=player.uuid))
 
     def apply_player_edits(self, **overrides: Any) -> None:
         """校验并保存玩家属性修改。"""
         world = self.require_world()
         player = self.current_player
         if player is None:
-            raise RuntimeError("请先在玩家列表中选择一个玩家（双击或单击选中）")
+            raise RuntimeError(tr("player.error.select_player"))
 
         def pick(keys: tuple[str, ...], var: tk.StringVar) -> Any:
             return self._pick(overrides, keys, var)
 
-        health = _parse_float(pick(("health",), self.health_var), "生命值 Health", minimum=0.0)
+        health = _parse_float(
+            pick(("health",), self.health_var), tr("field.health"), minimum=0.0,
+        )
         if health > 1e6:
-            raise ValueError("生命值不能超过 1000000")
-        food = _parse_int(pick(("food", "food_level"), self.food_var), "饥饿值 foodLevel", 0, 20)
+            raise ValueError(tr("player.error.health_too_high"))
+        food = _parse_int(
+            pick(("food", "food_level"), self.food_var), tr("field.food"), 0, 20,
+        )
         saturation = _parse_float(
             pick(("saturation", "food_saturation"), self.saturation_var),
-            "饱和度 foodSaturationLevel", minimum=0.0,
+            tr("field.saturation"), minimum=0.0,
         )
-        xp_level = _parse_int(pick(("xp_level",), self.xp_level_var), "经验等级 XpLevel", minimum=0)
-        xp_progress = _parse_float(pick(("xp_progress", "xp_p"), self.xp_progress_var), "经验进度 XpP")
+        xp_level = _parse_int(
+            pick(("xp_level",), self.xp_level_var), tr("field.xp_level"), minimum=0,
+        )
+        xp_progress = _parse_float(
+            pick(("xp_progress", "xp_p"), self.xp_progress_var), tr("field.xp_progress"),
+        )
         if not 0.0 <= xp_progress < 1.0:
-            raise ValueError(f"经验进度 XpP 必须在 [0,1) 区间（当前 {xp_progress:g}）")
-        xp_total = _parse_int(pick(("xp_total",), self.xp_total_var), "总经验 XpTotal", minimum=0)
-        pos_x = _parse_float(pick(("pos_x", "x"), self.pos_x_var), "位置 X")
-        pos_y = _parse_float(pick(("pos_y", "y"), self.pos_y_var), "位置 Y")
-        pos_z = _parse_float(pick(("pos_z", "z"), self.pos_z_var), "位置 Z")
+            raise ValueError(
+                tr("player.error.xp_progress_range", value=xp_progress)
+            )
+        xp_total = _parse_int(
+            pick(("xp_total",), self.xp_total_var), tr("field.xp_total"), minimum=0,
+        )
+        pos_x = _parse_float(pick(("pos_x", "x"), self.pos_x_var), tr("field.pos_x"))
+        pos_y = _parse_float(pick(("pos_y", "y"), self.pos_y_var), tr("field.pos_y"))
+        pos_z = _parse_float(pick(("pos_z", "z"), self.pos_z_var), tr("field.pos_z"))
         game_type = str(pick(("game_type", "gametype"), self.player_gametype_var)).strip().lower()
         if game_type not in GAME_TYPE_CHOICES:
             raise ValueError(
-                f"未知游戏模式：{game_type!r}（可选 {' / '.join(GAME_TYPE_CHOICES)}）"
+                tr(
+                    "error.unknown_game_type",
+                    value=repr(game_type),
+                    choices=" / ".join(GAME_TYPE_CHOICES),
+                )
             )
         dimension = str(pick(("dimension",), self.player_dimension_var)).strip()
         if not dimension:
-            raise ValueError("维度不能为空")
+            raise ValueError(tr("error.dimension_empty"))
 
         player.set_health(health)
         player.set_food(food, saturation)
@@ -2006,14 +2292,14 @@ class PlayerTab(_Tab):
         self.refresh_players()
         self.select_player(player_uuid)
         self.app.show_backups(new_backups)
-        self.app.set_status(f"已保存玩家 {player_uuid} 的属性修改")
+        self.app.set_status(tr("status.player_saved", uuid=player_uuid))
 
     def heal_player(self) -> None:
         """把当前玩家回满血并恢复饥饿度。"""
         world = self.require_world()
         player = self.current_player
         if player is None:
-            raise RuntimeError("请先在玩家列表中选择一个玩家（双击或单击选中）")
+            raise RuntimeError(tr("player.error.select_player"))
         player.heal()
         world.mark_player_dirty(player)
         before = len(world.backups)
@@ -2023,7 +2309,7 @@ class PlayerTab(_Tab):
         self.refresh_players()
         self.select_player(player_uuid)
         self.app.show_backups(new_backups)
-        self.app.set_status(f"玩家 {player_uuid} 已回满血")
+        self.app.set_status(tr("status.player_healed", uuid=player_uuid))
 
     def refresh(self) -> None:
         self.refresh_players()
@@ -2043,7 +2329,7 @@ class InventoryEditorDialog(tk.Toplevel):
         super().__init__(app)
         world = app.world
         if world is None:
-            raise RuntimeError("尚未打开世界，无法编辑物品栏。")
+            raise RuntimeError(tr("inventory.error.no_world"))
         self.parent_tab = parent_tab
         self.app = app
         self.world = world
@@ -2053,7 +2339,7 @@ class InventoryEditorDialog(tk.Toplevel):
         self._current_slot: Optional[int] = None
         self._suppress = False
 
-        self.title(f"物品栏编辑 — {player.uuid}")
+        self.title(tr("inventory.title", uuid=player.uuid))
         self.transient(app)
         self.geometry("1080x680")
         self.minsize(920, 560)
@@ -2066,14 +2352,16 @@ class InventoryEditorDialog(tk.Toplevel):
         header = ttk.Frame(self, padding=(10, 8, 10, 0))
         header.pack(fill="x")
         ttk.Label(
-            header, text=f"玩家：{self.player.uuid}",
+            header, text=tr("inventory.header.player", uuid=self.player.uuid),
             font=("Microsoft YaHei UI", 10, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             header,
-            text=(
-                f"处理版本 {self.world.version_profile.id}；物品格式 {self.item_format}；"
-                f"额外 NBT 字段 {self.extra_tag_name}。所有修改立即写入 playerdata 并自动备份。"
+            text=tr(
+                "inventory.header.details",
+                version=self.world.version_profile.id,
+                item_format=self.item_format,
+                extra_tag=self.extra_tag_name,
             ),
             style="Hint.TLabel",
             wraplength=1040,
@@ -2086,13 +2374,16 @@ class InventoryEditorDialog(tk.Toplevel):
         body.rowconfigure(0, weight=1)
 
         # ---- 槽位列表 ---------------------------------------------------- #
-        left = ttk.LabelFrame(body, text="物品栏槽位（双击/选中行编辑）", padding=6)
+        left = ttk.LabelFrame(body, text=tr("inventory.slots_box"), padding=6)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
         columns = ("slot_label", "item_id", "count", "extra")
         headings = {
-            "slot_label": "槽位", "item_id": "物品 id", "count": "数量", "extra": "额外 NBT",
+            "slot_label": tr("common.heading.slot"),
+            "item_id": tr("common.heading.item_id"),
+            "count": tr("common.heading.count"),
+            "extra": tr("common.heading.extra_nbt"),
         }
         widths = {"slot_label": 130, "item_id": 260, "count": 60, "extra": 300}
         self.tree = ttk.Treeview(
@@ -2108,31 +2399,38 @@ class InventoryEditorDialog(tk.Toplevel):
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         # ---- 编辑表单 ---------------------------------------------------- #
-        right = ttk.LabelFrame(body, text="槽位编辑", padding=8)
+        right = ttk.LabelFrame(body, text=tr("inventory.editor_box"), padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(1, weight=1)
         right.rowconfigure(4, weight=1)
 
-        ttk.Label(right, text="当前槽位：").grid(row=0, column=0, sticky="w", pady=2)
-        self.slot_var = tk.StringVar(value="（未选择）")
+        ttk.Label(right, text=tr("common.label.current_slot")).grid(
+            row=0, column=0, sticky="w", pady=2
+        )
+        self.slot_var = tk.StringVar(value=tr("common.not_selected"))
         ttk.Label(
             right, textvariable=self.slot_var, style="Hint.TLabel",
         ).grid(row=0, column=1, sticky="w", pady=2)
 
-        ttk.Label(right, text="物品 id：").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(right, text=tr("common.label.item_id")).grid(
+            row=1, column=0, sticky="w", pady=2
+        )
         self.id_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.id_var).grid(
             row=1, column=1, sticky="ew", pady=2
         )
 
-        ttk.Label(right, text="数量（1..99）：").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Label(right, text=tr("common.label.count")).grid(
+            row=2, column=0, sticky="w", pady=2
+        )
         self.count_var = tk.StringVar(value="1")
         ttk.Entry(right, textvariable=self.count_var, width=12).grid(
             row=2, column=1, sticky="w", pady=2
         )
 
         ttk.Label(
-            right, text=f"额外 NBT（{self.extra_tag_name}，SNBT）：",
+            right,
+            text=tr("common.label.extra_nbt_snbt", tag=self.extra_tag_name),
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 2))
         self.extra_editor = ScrolledText(
             right, height=12, wrap="word", undo=False, font=self.app.mono_font,
@@ -2141,7 +2439,7 @@ class InventoryEditorDialog(tk.Toplevel):
 
         ttk.Label(
             right,
-            text="留空表示无额外数据；保存时保留物品上其它未知字段。",
+            text=tr("inventory.hint.extra"),
             style="Hint.TLabel",
             wraplength=360,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -2149,21 +2447,21 @@ class InventoryEditorDialog(tk.Toplevel):
         buttons = ttk.Frame(right)
         buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.save_button = ttk.Button(
-            buttons, text="保存到该槽位", style="Accent.TButton", command=self._save,
+            buttons, text=tr("button.save_slot"), style="Accent.TButton", command=self._save,
         )
         self.save_button.pack(side="left")
         self.delete_button = ttk.Button(
-            buttons, text="删除该槽位物品", command=self._delete,
+            buttons, text=tr("button.delete_slot"), command=self._delete,
         )
         self.delete_button.pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="重新读取", command=self._refresh).pack(
+        ttk.Button(buttons, text=tr("button.reload"), command=self._refresh).pack(
             side="left", padx=(8, 0)
         )
-        ttk.Button(buttons, text="关闭", command=self._close).pack(
+        ttk.Button(buttons, text=tr("button.close"), command=self._close).pack(
             side="left", padx=(8, 0)
         )
 
-        self.status_var = tk.StringVar(value="选择左侧槽位后编辑")
+        self.status_var = tk.StringVar(value=tr("common.status.select_slot_hint"))
         ttk.Label(
             right, textvariable=self.status_var, style="Hint.TLabel", wraplength=360,
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -2184,13 +2482,15 @@ class InventoryEditorDialog(tk.Toplevel):
     def _load_slot(self, slot: int) -> None:
         self._current_slot = slot
         item = self.player.get_inventory_item(slot)
-        self.slot_var.set(f"{slot} — {slot_label(slot)}")
+        self.slot_var.set(
+            tr("inventory.slot_label", slot=slot, label=_slot_label(slot))
+        )
         if item is None:
             self.id_var.set("")
             self.count_var.set("1")
             _set_text(self.extra_editor, "", readonly=False)
             self.delete_button.configure(state="disabled")
-            self.status_var.set("空槽位：填写物品 id/数量后点击“保存到该槽位”。")
+            self.status_var.set(tr("inventory.status.empty_slot"))
             return
         self.id_var.set(item_id(item))
         self.count_var.set(str(item_count(item, self.item_format)))
@@ -2201,7 +2501,11 @@ class InventoryEditorDialog(tk.Toplevel):
             _set_text(self.extra_editor, "", readonly=False)
         self.delete_button.configure(state="normal")
         self.status_var.set(
-            f"已读取槽位 {slot}：{describe_item(item, self.item_format)}"
+            tr(
+                "inventory.status.loaded",
+                slot=slot,
+                description=_describe_item(item, self.item_format),
+            )
         )
 
     def _reload_rows(self, select_slot: Optional[int] = None) -> None:
@@ -2212,7 +2516,7 @@ class InventoryEditorDialog(tk.Toplevel):
             for slot in INVENTORY_SLOTS:
                 item = items.get(slot)
                 if item is None:
-                    values = (slot_label(slot), "—", "", "")
+                    values = (_slot_label(slot), "—", "", "")
                 else:
                     extra = item_extra(item, self.item_format)
                     preview = ""
@@ -2221,7 +2525,7 @@ class InventoryEditorDialog(tk.Toplevel):
                         if len(preview) > 80:
                             preview = preview[:77] + "..."
                     values = (
-                        slot_label(slot),
+                        _slot_label(slot),
                         item_id(item),
                         str(item_count(item, self.item_format)),
                         preview,
@@ -2247,9 +2551,11 @@ class InventoryEditorDialog(tk.Toplevel):
         try:
             tag = parse_snbt(text)
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"额外 NBT 解析失败：{_exc_text(exc)}") from exc
+            raise ValueError(
+                tr("error.extra_nbt_parse", error=_exc_text(exc))
+            ) from exc
         if not isinstance(tag, CompoundTag):
-            raise ValueError("额外 NBT 必须是一个 compound，例如 { ... }")
+            raise ValueError(tr("error.extra_nbt_compound"))
         return tag
 
     def _flush_player(self) -> str:
@@ -2263,18 +2569,20 @@ class InventoryEditorDialog(tk.Toplevel):
             self.parent_tab.select_player(self.player.uuid)
         except Exception:  # noqa: BLE001 - 父页面刷新失败不影响写入
             pass
-        return f"已备份 {len(new_backups)} 个文件" if new_backups else "已写入"
+        if new_backups:
+            return tr("status.backup_count", count=len(new_backups))
+        return tr("status.written")
 
     def _save(self) -> None:
         try:
             if self._current_slot is None:
-                raise ValueError("请先选择一个槽位")
+                raise ValueError(tr("inventory.error.no_slot"))
             if not self.id_var.get().strip():
-                raise ValueError("请填写物品 id（例如 minecraft:diamond）")
+                raise ValueError(tr("error.item_id_empty"))
             try:
                 count = int(self.count_var.get().strip())
             except ValueError:
-                raise ValueError("物品数量必须是整数") from None
+                raise ValueError(tr("error.item_count_not_int")) from None
             extra = self._parse_extra()
             existing = self.player.get_inventory_item(self._current_slot)
             if existing is not None:
@@ -2289,43 +2597,62 @@ class InventoryEditorDialog(tk.Toplevel):
             self.player.set_inventory_item(self._current_slot, item)
             backup_status = self._flush_player()
         except Exception as exc:  # noqa: BLE001 - 对话框边界
-            messagebox.showerror("保存物品失败", _exc_text(exc), parent=self)
+            messagebox.showerror(
+                tr("dialog.error.save_item.title"), _exc_text(exc), parent=self,
+            )
             return
         slot = self._current_slot
         self._reload_rows(select_slot=slot)
         self.status_var.set(
-            f"已保存槽位 {slot}：{describe_item(item, self.item_format)}；{backup_status}"
+            tr(
+                "inventory.status.saved",
+                slot=slot,
+                description=_describe_item(item, self.item_format),
+                backup=backup_status,
+            )
         )
-        self.app.set_status(f"物品栏：已保存槽位 {slot} 的物品")
+        self.app.set_status(tr("status.inventory_saved", slot=slot))
 
     def _delete(self) -> None:
         if self._current_slot is None:
             return
         slot = self._current_slot
         if self.player.get_inventory_item(slot) is None:
-            self.status_var.set("该槽位为空，无需删除")
+            self.status_var.set(tr("inventory.status.empty_no_delete"))
             return
         if not messagebox.askyesno(
-            "删除物品", f"确定删除槽位 {slot}（{slot_label(slot)}）的物品？", parent=self,
+            tr("dialog.confirm.delete_item.title"),
+            tr(
+                "inventory.confirm.delete",
+                slot=slot,
+                label=_slot_label(slot),
+            ),
+            parent=self,
         ):
             return
         try:
             self.player.delete_inventory_item(slot)
             backup_status = self._flush_player()
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("删除物品失败", _exc_text(exc), parent=self)
+            messagebox.showerror(
+                tr("dialog.error.delete_item.title"), _exc_text(exc), parent=self,
+            )
             return
         self._reload_rows(select_slot=slot)
-        self.status_var.set(f"已删除槽位 {slot} 的物品；{backup_status}")
+        self.status_var.set(
+            tr("inventory.status.deleted", slot=slot, backup=backup_status)
+        )
 
     def _refresh(self) -> None:
         try:
             self.player = self.world.get_player(self.player.uuid)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("重新读取失败", _exc_text(exc), parent=self)
+            messagebox.showerror(
+                tr("dialog.error.reload.title"), _exc_text(exc), parent=self,
+            )
             return
         self._reload_rows()
-        self.status_var.set("已从 playerdata 重新读取物品栏")
+        self.status_var.set(tr("inventory.status.reloaded"))
 
     def _close(self) -> None:
         try:
@@ -2339,7 +2666,7 @@ class InventoryEditorDialog(tk.Toplevel):
                 self.parent_tab.select_player(self.parent_tab.current_uuid)
         except Exception:  # noqa: BLE001
             pass
-        self.app.set_status("已关闭物品栏编辑器")
+        self.app.set_status(tr("status.inventory_closed"))
         self.destroy()
 
 
@@ -2349,7 +2676,7 @@ class InventoryEditorDialog(tk.Toplevel):
 class ModDataTab(_Tab):
     """模组扩展数据页；每个子标签页自行标注模组/游戏/加载器版本。"""
 
-    title = "模组数据"
+    title_key = "tab.moddata"
 
     def _build(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -2357,7 +2684,7 @@ class ModDataTab(_Tab):
         self.notebook = ttk.Notebook(self)
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         self.curios_tab = CuriosTab(self.notebook, self.app)
-        self.notebook.add(self.curios_tab, text="Curios")
+        self.notebook.add(self.curios_tab, text=tr("tab.curios"))
 
     def refresh(self) -> None:
         self.curios_tab.refresh()
@@ -2372,7 +2699,7 @@ class CuriosTab(_Tab):
       - NeoForge 21.1.60+（范围 [21.1.60,)）
     """
 
-    title = "Curios"
+    title_key = "tab.curios"
     MOD_NAME = "Curios"
     MOD_VERSION = CURIO_MOD_VERSION
     GAME_VERSION = CURIO_MC_VERSION
@@ -2394,20 +2721,21 @@ class CuriosTab(_Tab):
         banner.columnconfigure(0, weight=1)
         ttk.Label(
             banner,
-            text=f"适用模组：Curios {self.MOD_VERSION}",
+            text=tr("curios.banner.mod", version=self.MOD_VERSION),
             font=("Microsoft YaHei UI", 10, "bold"),
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(
             banner,
-            text=(
-                f"适用游戏：Minecraft {self.GAME_VERSION}　　"
-                f"适用加载器：NeoForge {self.LOADER_VERSION}"
+            text=tr(
+                "curios.banner.versions",
+                game=self.GAME_VERSION,
+                loader=self.LOADER_VERSION,
             ),
             style="Hint.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         ttk.Label(
             banner,
-            text=CURIO_VERSION_WARNING,
+            text=tr("curios.warning.version"),
             style="Warn.TLabel",
             wraplength=1100,
             justify="left",
@@ -2419,14 +2747,11 @@ class CuriosTab(_Tab):
         ).grid(row=3, column=0, sticky="w", pady=(2, 0))
         ttk.Label(
             banner,
-            text=(
-                "数据路径：playerdata/<uuid>.dat → neoforge:attachments → "
-                "curios:inventory → Curios（存档不记录模组/加载器版本，请自行核对实际安装版本）"
-            ),
+            text=tr("curios.hint.data_path"),
             style="Hint.TLabel",
         ).grid(row=4, column=0, sticky="w", pady=(2, 0))
         ttk.Label(
-            banner, text=CURIO_VALIDATION_WARNING,
+            banner, text=tr("curios.warning.validation"),
             style="Hint.TLabel", wraplength=1100, justify="left",
         ).grid(row=5, column=0, sticky="w", pady=(2, 0))
 
@@ -2434,7 +2759,9 @@ class CuriosTab(_Tab):
         player_bar = ttk.Frame(self, padding=(8, 6))
         player_bar.grid(row=1, column=0, sticky="ew")
         player_bar.columnconfigure(3, weight=1)
-        ttk.Label(player_bar, text="玩家：").grid(row=0, column=0, sticky="w")
+        ttk.Label(player_bar, text=_label(tr("curios.label.player"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.player_var = tk.StringVar()
         self.player_combo = ttk.Combobox(
             player_bar, textvariable=self.player_var, state="readonly", width=42,
@@ -2442,9 +2769,9 @@ class CuriosTab(_Tab):
         self.player_combo.grid(row=0, column=1, sticky="w", padx=(0, 8))
         self.player_combo.bind("<<ComboboxSelected>>", self._on_player_change)
         ttk.Button(
-            player_bar, text="重新读取", command=self._reload_player,
+            player_bar, text=tr("button.reload"), command=self._reload_player,
         ).grid(row=0, column=2, sticky="w")
-        self.player_info_var = tk.StringVar(value="（未打开世界）")
+        self.player_info_var = tk.StringVar(value=tr("common.no_world"))
         ttk.Label(
             player_bar, textvariable=self.player_info_var, style="Hint.TLabel",
             wraplength=700, justify="left",
@@ -2457,14 +2784,17 @@ class CuriosTab(_Tab):
         body.columnconfigure(1, weight=2)
         body.rowconfigure(0, weight=1)
 
-        left = ttk.LabelFrame(body, text="Curios 装备槽（Stacks；外观槽 Cosmetics 保留只读）", padding=6)
+        left = ttk.LabelFrame(body, text=tr("curios.slots_box"), padding=6)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
         columns = ("group", "slot", "item", "count", "extra")
         headings = {
-            "group": "槽位组", "slot": "槽位", "item": "物品 id",
-            "count": "数量", "extra": "额外 NBT",
+            "group": tr("curios.heading.group"),
+            "slot": tr("common.heading.slot"),
+            "item": tr("common.heading.item_id"),
+            "count": tr("common.heading.count"),
+            "extra": tr("common.heading.extra_nbt"),
         }
         widths = {"group": 210, "slot": 70, "item": 260, "count": 55, "extra": 330}
         self.tree = ttk.Treeview(
@@ -2479,31 +2809,37 @@ class CuriosTab(_Tab):
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        right = ttk.LabelFrame(body, text="Curios 槽位编辑", padding=8)
+        right = ttk.LabelFrame(body, text=tr("curios.editor_box"), padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(1, weight=1)
         right.rowconfigure(4, weight=1)
 
-        ttk.Label(right, text="当前槽位：").grid(row=0, column=0, sticky="w", pady=2)
-        self.slot_var = tk.StringVar(value="（未选择）")
+        ttk.Label(right, text=tr("common.label.current_slot")).grid(
+            row=0, column=0, sticky="w", pady=2
+        )
+        self.slot_var = tk.StringVar(value=tr("common.not_selected"))
         ttk.Label(
             right, textvariable=self.slot_var, style="Hint.TLabel",
             wraplength=360, justify="left",
         ).grid(row=0, column=1, sticky="w", pady=2)
 
-        ttk.Label(right, text="物品 id：").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(right, text=tr("common.label.item_id")).grid(
+            row=1, column=0, sticky="w", pady=2
+        )
         self.id_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.id_var).grid(
             row=1, column=1, sticky="ew", pady=2
         )
 
-        ttk.Label(right, text="数量（1..99）：").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Label(right, text=tr("common.label.count")).grid(
+            row=2, column=0, sticky="w", pady=2
+        )
         self.count_var = tk.StringVar(value="1")
         ttk.Entry(right, textvariable=self.count_var, width=12).grid(
             row=2, column=1, sticky="w", pady=2
         )
 
-        self.extra_label_var = tk.StringVar(value="额外 NBT（components，SNBT）：")
+        self.extra_label_var = tk.StringVar(value=tr("curios.label.extra_default"))
         ttk.Label(right, textvariable=self.extra_label_var).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(6, 2),
         )
@@ -2513,28 +2849,25 @@ class CuriosTab(_Tab):
         self.extra_editor.grid(row=4, column=0, columnspan=2, sticky="nsew")
         ttk.Label(
             right,
-            text=(
-                "只写入所选槽位组的 Stacks.Items；保留 Renders/ActiveStates/"
-                "Cosmetics/DropRule 与附件里的其它模组数据。留空表示无额外 NBT。"
-            ),
+            text=tr("curios.hint.extra"),
             style="Hint.TLabel", wraplength=380, justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         buttons = ttk.Frame(right)
         buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.save_button = ttk.Button(
-            buttons, text="保存到该槽位", style="Accent.TButton", command=self._save,
+            buttons, text=tr("button.save_slot"), style="Accent.TButton", command=self._save,
         )
         self.save_button.pack(side="left")
         self.delete_button = ttk.Button(
-            buttons, text="删除该槽位物品", command=self._delete,
+            buttons, text=tr("button.delete_slot"), command=self._delete,
         )
         self.delete_button.pack(side="left", padx=(8, 0))
         ttk.Button(
-            buttons, text="重新读取", command=self._reload_player,
+            buttons, text=tr("button.reload"), command=self._reload_player,
         ).pack(side="left", padx=(8, 0))
 
-        self.status_var = tk.StringVar(value="选择左侧槽位后编辑")
+        self.status_var = tk.StringVar(value=tr("common.status.select_slot_hint"))
         ttk.Label(
             right, textvariable=self.status_var, style="Hint.TLabel",
             wraplength=380, justify="left",
@@ -2549,18 +2882,21 @@ class CuriosTab(_Tab):
             self._row_map.clear()
             self.player_combo.configure(values=[])
             self.player_var.set("")
-            self.player_info_var.set("（未打开世界）")
+            self.player_info_var.set(tr("common.no_world"))
             self.mismatch_var.set("")
             self.groups = []
             self._row_map.clear()
             self._reload_table()
             self._clear_editor()
-            self.status_var.set("未打开世界")
+            self.status_var.set(tr("status.no_world"))
             return
         if world.version_profile.id != self.GAME_VERSION:
             self.mismatch_var.set(
-                f"当前存档处理版本 {world.version_profile.id} 与 Curios 子标签适用版本 "
-                f"Minecraft {self.GAME_VERSION} 不一致；结构可能不同，修改有风险。"
+                tr(
+                    "curios.mismatch",
+                    version=world.version_profile.id,
+                    game=self.GAME_VERSION,
+                )
             )
         else:
             self.mismatch_var.set("")
@@ -2579,14 +2915,14 @@ class CuriosTab(_Tab):
             self.player = None
             self.groups = []
             self._row_map.clear()
-            self.player_info_var.set("playerdata 中没有可读玩家")
+            self.player_info_var.set(tr("curios.no_players"))
             self._reload_table()
-            self.status_var.set("没有玩家数据")
+            self.status_var.set(tr("curios.status.no_player_data"))
             return
         try:
             self._load_player(active)
         except Exception as exc:  # noqa: BLE001 - UI 边界
-            self.app.show_error("加载 Curios 数据失败", exc)
+            self.app.show_error(tr("dialog.error.load_curios.title"), exc)
 
     def _on_player_change(self, _event: "tk.Event | None" = None) -> None:
         uuid = self.player_var.get()
@@ -2594,7 +2930,7 @@ class CuriosTab(_Tab):
             try:
                 self._load_player(uuid)
             except Exception as exc:  # noqa: BLE001
-                self.app.show_error("加载 Curios 数据失败", exc)
+                self.app.show_error(tr("dialog.error.load_curios.title"), exc)
 
     def _reload_player(self) -> None:
         world = self.app.world
@@ -2604,9 +2940,9 @@ class CuriosTab(_Tab):
         try:
             self.player = world.get_player(uuid)
             self._reload_table()
-            self.status_var.set("已从 playerdata 重新读取 Curios 数据")
+            self.status_var.set(tr("curios.status.reloaded"))
         except Exception as exc:  # noqa: BLE001
-            self.app.show_error("重新读取 Curios 数据失败", exc)
+            self.app.show_error(tr("dialog.error.reload_curios.title"), exc)
 
     def _load_player(self, uuid: str) -> None:
         if self.app.world is None:
@@ -2614,20 +2950,27 @@ class CuriosTab(_Tab):
         self.player = self.app.world.get_player(uuid)
         self.groups = list_groups(self.player)
         item_format = self.app.world.version_profile.item_format
-        self.extra_label_var.set(f"额外 NBT（{extra_key(item_format)}，SNBT）：")
+        self.extra_label_var.set(
+            tr("curios.label.extra", tag=extra_key(item_format))
+        )
         if not has_curios(self.player):
             self.player_info_var.set(
-                f"{uuid}：没有 Curios 数据（可能未安装 Curios 或该玩家从未使用）"
+                tr("curios.info.no_data", uuid=uuid)
             )
         else:
             total_slots = sum(max(0, g.size) for g in self.groups)
             equipped = sum(len(g.items) for g in self.groups)
             self.player_info_var.set(
-                f"{uuid}：{len(self.groups)} 个槽位组，{total_slots} 个槽位，"
-                f"{equipped} 件已装备"
+                tr(
+                    "curios.info.summary",
+                    uuid=uuid,
+                    groups=len(self.groups),
+                    slots=total_slots,
+                    equipped=equipped,
+                )
             )
         self._reload_table()
-        self.status_var.set("已加载 Curios 数据")
+        self.status_var.set(tr("curios.status.loaded"))
 
     def _reload_table(self, select: Optional[tuple[str, int]] = None) -> None:
         self._suppress_select = True
@@ -2644,7 +2987,11 @@ class CuriosTab(_Tab):
                     self._row_map[iid] = (group.identifier, slot)
                     if item is None:
                         values = (
-                            f"{slot_display_name(group.identifier)}（{group.identifier}）",
+                            tr(
+                                "curios.group_display",
+                                name=_curio_slot_name(group.identifier),
+                                id=group.identifier,
+                            ),
                             f"{slot + 1}/{group.size}", "—", "", "",
                         )
                     else:
@@ -2655,7 +3002,11 @@ class CuriosTab(_Tab):
                             if len(preview) > 90:
                                 preview = preview[:87] + "..."
                         values = (
-                            f"{slot_display_name(group.identifier)}（{group.identifier}）",
+                            tr(
+                                "curios.group_display",
+                                name=_curio_slot_name(group.identifier),
+                                id=group.identifier,
+                            ),
                             f"{slot + 1}/{group.size}",
                             item_id(item),
                             str(item_count(item, item_format)),
@@ -2701,15 +3052,20 @@ class CuriosTab(_Tab):
         self._current = (identifier, slot)
         item = group.items.get(slot)
         self.slot_var.set(
-            f"{slot_display_name(identifier)}（{identifier}）— 槽位 "
-            f"{slot + 1}/{group.size}"
+            tr(
+                "curios.slot_display",
+                name=_curio_slot_name(identifier),
+                id=identifier,
+                slot=slot + 1,
+                size=group.size,
+            )
         )
         if item is None:
             self.id_var.set("")
             self.count_var.set("1")
             _set_text(self.extra_editor, "", readonly=False)
             self.delete_button.configure(state="disabled")
-            self.status_var.set("空 Curios 槽位：填写物品后点击“保存到该槽位”。")
+            self.status_var.set(tr("curios.status.empty_slot"))
             return
         item_format = self.app.world.version_profile.item_format
         self.id_var.set(item_id(item))
@@ -2721,12 +3077,17 @@ class CuriosTab(_Tab):
             _set_text(self.extra_editor, "", readonly=False)
         self.delete_button.configure(state="normal")
         self.status_var.set(
-            f"已读取 {identifier} 槽位 {slot + 1}：{item_id(item) or '?'}"
+            tr(
+                "curios.status.loaded_row",
+                identifier=identifier,
+                slot=slot + 1,
+                item_id=item_id(item) or "?",
+            )
         )
 
     def _clear_editor(self) -> None:
         self._current = None
-        self.slot_var.set("（未选择）")
+        self.slot_var.set(tr("common.not_selected"))
         self.id_var.set("")
         self.count_var.set("1")
         _set_text(self.extra_editor, "", readonly=False)
@@ -2739,9 +3100,11 @@ class CuriosTab(_Tab):
         try:
             tag = parse_snbt(text)
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"额外 NBT 解析失败：{_exc_text(exc)}") from exc
+            raise ValueError(
+                tr("error.extra_nbt_parse", error=_exc_text(exc))
+            ) from exc
         if not isinstance(tag, CompoundTag):
-            raise ValueError("额外 NBT 必须是一个 compound，例如 { ... }")
+            raise ValueError(tr("error.extra_nbt_compound"))
         return tag
 
     def _flush_player(self) -> str:
@@ -2757,29 +3120,34 @@ class CuriosTab(_Tab):
                 self.app.player_tab.select_player(self.app.player_tab.current_uuid)
         except Exception:  # noqa: BLE001 - 刷新失败不影响写入
             pass
-        return f"已备份 {len(backups)} 个文件" if backups else "已写入"
+        if backups:
+            return tr("status.backup_count", count=len(backups))
+        return tr("status.written")
 
     def _reload_player_from_disk(self) -> None:
         """保存/删除前重新读盘，避免用打开页面时的旧玩家数据覆盖其它标签页的修改。"""
         if self.player is None or self.app.world is None:
-            raise RuntimeError("没有可用的玩家数据")
+            raise RuntimeError(tr("curios.error.no_player"))
         self.player = self.app.world.get_player(self.player.uuid)
         self.groups = list_groups(self.player)
 
     def _save(self) -> None:
         if self._current is None:
-            messagebox.showinfo("提示", "请先选择一个 Curios 槽位。", parent=self.winfo_toplevel())
+            messagebox.showinfo(
+                tr("dialog.info.title"), tr("curios.info.select_slot"),
+                parent=self.winfo_toplevel(),
+            )
             return
         identifier, slot = self._current
         try:
             # 先刷新，避免覆盖玩家页/物品栏页刚才的修改
             self._reload_player_from_disk()
             if not self.id_var.get().strip():
-                raise ValueError("请填写物品 id（例如 minecraft:diamond）")
+                raise ValueError(tr("error.item_id_empty"))
             try:
                 count = int(self.count_var.get().strip())
             except ValueError:
-                raise ValueError("物品数量必须是整数") from None
+                raise ValueError(tr("error.item_count_not_int")) from None
             extra = self._parse_extra()
             item_format = self.app.world.version_profile.item_format
             existing = get_curio_item(self.player, identifier, slot)
@@ -2795,16 +3163,26 @@ class CuriosTab(_Tab):
                 set_curio_item(self.player, identifier, slot, item, item_format)
             backup_status = self._flush_player()
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("保存 Curios 物品失败", _exc_text(exc),
-                                 parent=self.winfo_toplevel())
+            messagebox.showerror(
+                tr("dialog.error.save_curio.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
             return
         self._load_player(self.player.uuid)
         self._reload_table(select=(identifier, slot))
         self.status_var.set(
-            f"已保存 {identifier} 槽位 {slot + 1}：{item_id(item)} x"
-            f"{item_count(item, item_format)}；{backup_status}"
+            tr(
+                "curios.status.saved",
+                identifier=identifier,
+                slot=slot + 1,
+                item_id=item_id(item),
+                count=item_count(item, item_format),
+                backup=backup_status,
+            )
         )
-        self.app.set_status(f"Curios：已保存 {identifier} 槽位 {slot + 1} 的物品")
+        self.app.set_status(
+            tr("status.curios_saved", identifier=identifier, slot=slot + 1)
+        )
 
     def _delete(self) -> None:
         if self._current is None:
@@ -2813,16 +3191,22 @@ class CuriosTab(_Tab):
         try:
             self._reload_player_from_disk()
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("重新读取 Curios 数据失败", _exc_text(exc),
-                                 parent=self.winfo_toplevel())
+            messagebox.showerror(
+                tr("dialog.error.reload_curios.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
             return
         if get_curio_item(self.player, identifier, slot) is None:
-            self.status_var.set("该槽位为空，无需删除")
+            self.status_var.set(tr("inventory.status.empty_no_delete"))
             return
         if not messagebox.askyesno(
-            "删除 Curios 物品",
-            f"确定删除 {slot_display_name(identifier)}（{identifier}）"
-            f"槽位 {slot + 1} 的物品？",
+            tr("dialog.confirm.delete_curio.title"),
+            tr(
+                "curios.confirm.delete",
+                name=_curio_slot_name(identifier),
+                id=identifier,
+                slot=slot + 1,
+            ),
             parent=self.winfo_toplevel(),
         ):
             return
@@ -2830,13 +3214,20 @@ class CuriosTab(_Tab):
             delete_curio_item(self.player, identifier, slot)
             backup_status = self._flush_player()
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("删除 Curios 物品失败", _exc_text(exc),
-                                 parent=self.winfo_toplevel())
+            messagebox.showerror(
+                tr("dialog.error.delete_curio.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
             return
         self._load_player(self.player.uuid)
         self._reload_table(select=(identifier, slot))
         self.status_var.set(
-            f"已删除 {identifier} 槽位 {slot + 1} 的物品；{backup_status}"
+            tr(
+                "curios.status.deleted",
+                identifier=identifier,
+                slot=slot + 1,
+                backup=backup_status,
+            )
         )
 
 
@@ -2846,7 +3237,7 @@ class CuriosTab(_Tab):
 class NbtTab(_Tab):
     """任意 NBT 文件的路径读取/写入（高级）。"""
 
-    title = "原始 NBT"
+    title_key = "tab.nbt"
 
     def _build(self) -> None:
         self.file_presets: list[str] = []
@@ -2856,17 +3247,23 @@ class NbtTab(_Tab):
         file_frame = ttk.Frame(self)
         file_frame.grid(row=0, column=0, sticky="ew")
         file_frame.columnconfigure(1, weight=1)
-        ttk.Label(file_frame, text="文件（相对世界目录）：").grid(row=0, column=0, sticky="w")
+        ttk.Label(file_frame, text=_label(tr("nbt.label.file"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.file_var = tk.StringVar()
         self.file_entry = ttk.Entry(file_frame, textvariable=self.file_var)
         self.file_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
-        self.browse_button = ttk.Button(file_frame, text="浏览...", command=self._ui_browse)
+        self.browse_button = ttk.Button(
+            file_frame, text=tr("button.browse"), command=self._ui_browse,
+        )
         self.browse_button.grid(row=0, column=2)
 
         preset_frame = ttk.Frame(self)
         preset_frame.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         preset_frame.columnconfigure(1, weight=1)
-        ttk.Label(preset_frame, text="常用文件：").grid(row=0, column=0, sticky="w")
+        ttk.Label(preset_frame, text=_label(tr("nbt.label.preset"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.preset_var = tk.StringVar()
         self.preset_combo = ttk.Combobox(
             preset_frame, textvariable=self.preset_var, state="readonly",
@@ -2874,53 +3271,62 @@ class NbtTab(_Tab):
         self.preset_combo.grid(row=0, column=1, sticky="ew")
         self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
         self.refresh_button = ttk.Button(
-            preset_frame, text="刷新列表", command=lambda: self._run_ui(self.refresh),
+            preset_frame, text=tr("button.refresh_list"),
+            command=lambda: self._run_ui(self.refresh),
         )
         self.refresh_button.grid(row=0, column=2, padx=(6, 0))
 
         path_frame = ttk.Frame(self)
         path_frame.grid(row=2, column=0, sticky="ew", pady=(6, 6))
         path_frame.columnconfigure(1, weight=1)
-        ttk.Label(path_frame, text="NBT 路径：").grid(row=0, column=0, sticky="w")
+        ttk.Label(path_frame, text=_label(tr("nbt.label.path"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.path_var = self.nbt_path_var = tk.StringVar()
         self.path_entry = self.nbt_path_entry = ttk.Entry(path_frame, textvariable=self.path_var)
         self.path_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
-        self.read_button = ttk.Button(path_frame, text="读取", command=self._ui_read)
+        self.read_button = ttk.Button(path_frame, text=tr("button.read"), command=self._ui_read)
         self.read_button.grid(row=0, column=2)
         ttk.Label(
-            path_frame, text="（留空显示整个根 compound；支持 a.b[0].c 形式）", style="Hint.TLabel",
+            path_frame, text=tr("nbt.hint.path"), style="Hint.TLabel",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
         self.output = ScrolledText(
             self, height=14, wrap="word", undo=False, font=self.app.mono_font,
         )
         self.output.grid(row=3, column=0, sticky="nsew")
-        _set_text(self.output, "（选择文件并点击“读取”。）")
+        _set_text(self.output, tr("nbt.output_initial"))
 
-        write_box = ttk.LabelFrame(self, text="写入", padding=8)
+        write_box = ttk.LabelFrame(self, text=tr("nbt.write_box"), padding=8)
         write_box.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         write_box.columnconfigure(3, weight=1)
-        ttk.Label(write_box, text="类型：").grid(row=0, column=0, sticky="w")
+        ttk.Label(write_box, text=_label(tr("nbt.label.type"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.value_type_var = tk.StringVar(value="auto")
         self.value_type_combo = ttk.Combobox(
             write_box, textvariable=self.value_type_var, values=NBT_VALUE_TYPES,
             state="readonly", width=12,
         )
         self.value_type_combo.grid(row=0, column=1, sticky="w", padx=(0, 8))
-        ttk.Label(write_box, text="值（SNBT）：").grid(row=0, column=2, sticky="w")
+        ttk.Label(write_box, text=_label(tr("nbt.label.value"))).grid(
+            row=0, column=2, sticky="w"
+        )
         self.value_var = self.value_text_var = tk.StringVar()
         self.value_entry = ttk.Entry(write_box, textvariable=self.value_var)
         self.value_entry.grid(row=0, column=3, sticky="ew")
         self.create_var = tk.BooleanVar(value=False)
         self.create_check = ttk.Checkbutton(
-            write_box, text="自动创建中间节点", variable=self.create_var,
+            write_box, text=tr("nbt.create_nodes"), variable=self.create_var,
         )
         self.create_check.grid(row=0, column=4, padx=(8, 0))
-        self.write_button = ttk.Button(write_box, text="写入", command=self._ui_write)
+        self.write_button = ttk.Button(
+            write_box, text=tr("button.write"), command=self._ui_write,
+        )
         self.write_button.grid(row=0, column=5, padx=(8, 0))
         ttk.Label(
             write_box,
-            text="写入 level.dat 后会自动重新加载世界信息；写入 playerdata 后会自动刷新玩家列表。",
+            text=tr("nbt.hint.write_effect"),
             style="Hint.TLabel",
         ).grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
@@ -2931,9 +3337,12 @@ class NbtTab(_Tab):
             initial = world.path if world is not None else os.path.expanduser("~")
             selected = filedialog.askopenfilename(
                 parent=self,
-                title="选择 NBT 文件（.dat）",
+                title=tr("nbt.file_dialog.title"),
                 initialdir=initial,
-                filetypes=[("NBT 数据文件", "*.dat"), ("所有文件", "*.*")],
+                filetypes=[
+                    (tr("nbt.file_dialog.nbt_type"), "*.dat"),
+                    (tr("nbt.file_dialog.all_files"), "*.*"),
+                ],
             )
             if not selected:
                 return
@@ -2945,7 +3354,7 @@ class NbtTab(_Tab):
                     path = selected
             self.file_var.set(path)
         except Exception as exc:  # noqa: BLE001
-            self.app.show_error("选择文件失败", exc)
+            self.app.show_error(tr("dialog.error.select_file.title"), exc)
 
     def _on_preset_selected(self, _event: "tk.Event | None" = None) -> None:
         preset = self.preset_var.get().strip()
@@ -2967,7 +3376,7 @@ class NbtTab(_Tab):
     def _file_target(self, file: Optional[str]) -> str:
         target = str(file if file is not None else self.file_var.get()).strip()
         if not target:
-            raise ValueError("请填写要操作的 NBT 文件（相对世界目录，例如 level.dat）")
+            raise ValueError(tr("nbt.error.file_empty"))
         return target
 
     # ---- 公开方法 -------------------------------------------------------- #
@@ -2991,7 +3400,7 @@ class NbtTab(_Tab):
             self.preset_var.set("")
             if world is None:
                 self.file_var.set("")
-                _set_text(self.output, "（未打开世界）")
+                _set_text(self.output, tr("common.no_world"))
 
     def read(
         self,
@@ -3007,13 +3416,21 @@ class NbtTab(_Tab):
             try:
                 value = nbt_get_path(tag, nbt_path)
             except (KeyError, IndexError, NbtError) as exc:
-                raise NbtError(f"读取路径 {nbt_path!r} 失败：{_exc_text(exc)}") from exc
+                raise NbtError(
+                    tr(
+                        "nbt.error.read_path",
+                        path=repr(nbt_path),
+                        error=_exc_text(exc),
+                    )
+                ) from exc
         else:
             value = tag
         text = to_snbt(value)
         _set_text(self.output, text)
-        suffix = f" 的 {nbt_path}" if nbt_path else "（根节点）"
-        self.app.set_status(f"已读取 {target}{suffix}")
+        suffix = (
+            tr("nbt.path_suffix", path=nbt_path) if nbt_path else tr("nbt.root_suffix")
+        )
+        self.app.set_status(tr("status.nbt_read", target=target, suffix=suffix))
         return text
 
     def write(
@@ -3029,14 +3446,18 @@ class NbtTab(_Tab):
         target = self._file_target(file)
         nbt_path = str(path if path is not None else self.path_var.get()).strip()
         if not nbt_path:
-            raise NbtError("写入时必须指定 NBT 路径（不能替换根节点）")
+            raise NbtError(tr("nbt.error.write_path_required"))
         raw_value = str(value_text or "").strip()
         if not raw_value:
-            raise ValueError("写入值不能为空（请填写 SNBT，例如 1000 / \"text\" / {a:1}）")
+            raise ValueError(tr("nbt.error.value_empty"))
         value_type = (str(value_type or "auto").strip().lower() or "auto")
         if value_type not in NBT_VALUE_TYPES:
             raise ValueError(
-                f"未知值类型：{value_type!r}（可选 {' / '.join(NBT_VALUE_TYPES)}）"
+                tr(
+                    "error.unknown_value_type",
+                    value=repr(value_type),
+                    choices=" / ".join(NBT_VALUE_TYPES),
+                )
             )
 
         _name, tag = world.read_dat(target)
@@ -3048,7 +3469,9 @@ class NbtTab(_Tab):
             try:
                 parsed = parse_snbt(raw_value)
             except Exception as exc:
-                raise ValueError(f"SNBT 解析失败：{_exc_text(exc)}") from exc
+                raise ValueError(
+                    tr("nbt.error.snbt_parse", error=_exc_text(exc))
+                ) from exc
             value = coerce_typed(parsed, "auto", existing)
         else:
             value = coerce_typed(raw_value, value_type, None)
@@ -3057,8 +3480,11 @@ class NbtTab(_Tab):
             nbt_set_path(tag, nbt_path, value, create=bool(create))
         except (KeyError, IndexError, NbtError) as exc:
             raise NbtError(
-                f"写入路径 {nbt_path!r} 失败：{_exc_text(exc)}\n"
-                "提示：可勾选“自动创建中间节点”。"
+                tr(
+                    "nbt.error.write_path",
+                    path=repr(nbt_path),
+                    error=_exc_text(exc),
+                )
             ) from exc
 
         before = len(world.backups)
@@ -3078,9 +3504,11 @@ class NbtTab(_Tab):
 
         written = to_snbt(value)
         _set_text(self.output, written)
-        suffix = f" 的 {nbt_path}" if nbt_path else ""
+        suffix = tr("nbt.path_suffix", path=nbt_path) if nbt_path else ""
         self.app.show_backups(new_backups)
-        self.app.set_status(f"已写入 {target}{suffix} = {written}")
+        self.app.set_status(
+            tr("status.nbt_written", target=target, suffix=suffix, value=written)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -3089,7 +3517,7 @@ class NbtTab(_Tab):
 class VerifyTab(_Tab):
     """世界校验（浅层/深度）与整世界备份（后台线程）。"""
 
-    title = "校验 / 备份"
+    title_key = "tab.verify"
 
     def _build(self) -> None:
         self.is_running = False
@@ -3102,19 +3530,22 @@ class VerifyTab(_Tab):
         button_bar = ttk.Frame(self)
         button_bar.grid(row=0, column=0, sticky="ew")
         self.shallow_button = ttk.Button(
-            button_bar, text="浅层校验", command=lambda: self._ui_start_verify(False),
+            button_bar, text=tr("button.shallow_verify"),
+            command=lambda: self._ui_start_verify(False),
         )
         self.shallow_button.pack(side="left")
         self.deep_button = ttk.Button(
-            button_bar, text="深度校验", command=lambda: self._ui_start_verify(True),
+            button_bar, text=tr("button.deep_verify"),
+            command=lambda: self._ui_start_verify(True),
         )
         self.deep_button.pack(side="left", padx=(8, 0))
         self.backup_button = ttk.Button(
-            button_bar, text="整世界备份", command=lambda: self._ui_start_backup(),
+            button_bar, text=tr("button.backup_world"),
+            command=lambda: self._ui_start_backup(),
         )
         self.backup_button.pack(side="left", padx=(8, 0))
         self.open_backup_button = ttk.Button(
-            button_bar, text="打开备份目录", command=self._ui_open_backup_dir,
+            button_bar, text=tr("button.open_backup_dir"), command=self._ui_open_backup_dir,
         )
         self.open_backup_button.pack(side="left", padx=(8, 0))
 
@@ -3125,7 +3556,7 @@ class VerifyTab(_Tab):
             status_bar, mode="determinate", length=220, maximum=100, value=0,
         )
         self.progress.grid(row=0, column=0, sticky="w")
-        self.task_var = tk.StringVar(value="空闲")
+        self.task_var = tk.StringVar(value=tr("status.idle"))
         self.task_label = ttk.Label(status_bar, textvariable=self.task_var, anchor="w")
         self.task_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
@@ -3133,7 +3564,7 @@ class VerifyTab(_Tab):
             self, height=18, wrap="word", undo=False, font=self.app.mono_font,
         )
         self.output.grid(row=2, column=0, sticky="nsew")
-        _set_text(self.output, "（点击“浅层校验”或“深度校验”开始，报告将显示在这里。）")
+        _set_text(self.output, tr("verify.output_initial"))
 
     # ---- 内部 ------------------------------------------------------------ #
     def _set_output(self, text: str) -> None:
@@ -3154,14 +3585,14 @@ class VerifyTab(_Tab):
                 self.progress.start(12)
             except tk.TclError:
                 pass
-            self.task_var.set(task or "处理中...")
+            self.task_var.set(task or tr("verify.status.busy"))
         else:
             try:
                 self.progress.stop()
                 self.progress.configure(mode="determinate", value=0)
             except tk.TclError:
                 pass
-            self.task_var.set("空闲")
+            self.task_var.set(tr("status.idle"))
         state = "disabled" if busy else "normal"
         for button in (
             self.shallow_button, self.deep_button, self.backup_button,
@@ -3185,52 +3616,66 @@ class VerifyTab(_Tab):
                 import subprocess
 
                 subprocess.Popen(["xdg-open", target])
-            self.app.set_status(f"已打开目录：{target}")
+            self.app.set_status(tr("status.opened_dir", path=target))
         except Exception as exc:  # noqa: BLE001
-            self.app.show_error("打开备份目录失败", exc)
+            self.app.show_error(tr("dialog.error.open_backup_dir.title"), exc)
 
     def _finish_verify(self, payload: Any, deep: bool) -> None:
         self._set_busy(False)
         if isinstance(payload, BaseException):
-            self._set_output(f"校验失败：{_exc_text(payload)}")
-            self.app.set_status("校验失败")
+            self._set_output(
+                tr("verify.status.failed_output", error=_exc_text(payload))
+            )
+            self.app.set_status(tr("verify.status.failed"))
             return
         self.last_report = payload
         self._set_output(self.format_report(payload))
-        result = "通过" if isinstance(payload, dict) and payload.get("ok") else "失败"
-        self.app.set_status(f"{'深度' if deep else '浅层'}校验完成：{result}")
+        result = (
+            tr("common.pass")
+            if isinstance(payload, dict) and payload.get("ok")
+            else tr("common.fail")
+        )
+        kind = tr("verify.kind.deep") if deep else tr("verify.kind.shallow")
+        self.app.set_status(tr("verify.status.done", kind=kind, result=result))
 
     def _finish_backup(self, payload: Any) -> None:
         self._set_busy(False)
         if isinstance(payload, BaseException):
-            self._set_output(f"备份失败：{_exc_text(payload)}")
-            self.app.set_status("整世界备份失败")
+            self._set_output(
+                tr("verify.status.backup_failed_output", error=_exc_text(payload))
+            )
+            self.app.set_status(tr("verify.status.backup_failed"))
             return
         backup_path = str(payload)
-        self._set_output(f"整世界备份完成。\n备份目录：{backup_path}")
+        self._set_output(tr("verify.output.backup_done", path=backup_path))
         self.app.show_backups([backup_path])
-        self.app.set_status(f"整世界备份完成：{backup_path}")
+        self.app.set_status(tr("verify.status.backup_done", path=backup_path))
 
     # ---- 公开方法 -------------------------------------------------------- #
     def refresh(self) -> None:
         if self.is_running:
             return
         if self.app.world is None:
-            self.task_var.set("未打开世界")
+            self.task_var.set(tr("status.no_world"))
         else:
-            self.task_var.set("空闲")
+            self.task_var.set(tr("status.idle"))
 
     def start_verify(self, deep: bool = False) -> None:
         """在后台线程执行世界校验；完成后自动回到主线程更新界面。"""
         world = self.require_world()
         if self.is_running:
-            raise RuntimeError("已有后台任务正在运行，请等待其完成。")
-        self._set_busy(True, "深度校验中..." if deep else "浅层校验中...")
-        self._set_output(
-            f"正在执行{'深度' if deep else '浅层'}校验，请稍候...\n"
-            f"世界目录：{world.path}\n"
+            raise RuntimeError(tr("error.background_running"))
+        kind = tr("verify.kind.deep") if deep else tr("verify.kind.shallow")
+        self._set_busy(
+            True,
+            tr("verify.status.deep_running")
+            if deep
+            else tr("verify.status.shallow_running"),
         )
-        self.app.set_status(f"正在执行{'深度' if deep else '浅层'}校验（后台）...")
+        self._set_output(
+            tr("verify.output.running", kind=kind, path=world.path)
+        )
+        self.app.set_status(tr("verify.status.running", kind=kind))
         self.app.run_background(
             lambda: world.verify(deep=deep),
             lambda payload: self._finish_verify(payload, deep),
@@ -3241,73 +3686,106 @@ class VerifyTab(_Tab):
         """在后台线程执行整世界备份；完成后刷新界面。"""
         world = self.require_world()
         if self.is_running:
-            raise RuntimeError("已有后台任务正在运行，请等待其完成。")
-        self._set_busy(True, "整世界备份中...")
-        self._set_output(f"正在备份整个世界，请稍候...\n世界目录：{world.path}\n")
-        self.app.set_status("正在执行整世界备份（后台）...")
+            raise RuntimeError(tr("error.background_running"))
+        self._set_busy(True, tr("verify.status.backup_running"))
+        self._set_output(tr("verify.output.backup_running", path=world.path))
+        self.app.set_status(tr("verify.status.backup_running_status"))
         self.app.run_background(
             world.backup_world, self._finish_backup, description="backup-world",
         )
 
     def format_report(self, report: dict) -> str:
-        """把 ``World.verify()`` 返回的报告格式化成中文文本。"""
+        """把 ``World.verify()`` 返回的报告格式化成当前语言文本。"""
         if not isinstance(report, dict):
-            return f"校验报告格式错误：{report!r}"
+            return tr("verify.report.invalid", report=repr(report))
         ok = bool(report.get("ok"))
         level = report.get("level") or {}
         lines: list[str] = []
         lines.append("=" * 68)
-        lines.append(f"校验结果：{'通过' if ok else '失败'}")
+        lines.append(
+            tr(
+                "verify.report.result",
+                result=tr("common.pass") if ok else tr("common.fail"),
+            )
+        )
         lines.append("=" * 68)
         lines.append(
-            "level.dat："
-            f"DataVersion={level.get('data_version', '?')}，"
-            f"世界名称={level.get('level_name', '?')!r}，"
-            f"已检查 section 数={level.get('sections_checked', 0)}"
+            tr(
+                "verify.report.level",
+                data_version=level.get("data_version", "?"),
+                level_name=repr(level.get("level_name", "?")),
+                sections_checked=level.get("sections_checked", 0),
+            )
         )
         dimensions = report.get("dimensions") or {}
         if dimensions:
             lines.append("")
-            lines.append("维度：")
+            lines.append(tr("verify.report.dimensions"))
             for dim, stats in dimensions.items():
                 stats = stats if isinstance(stats, dict) else {}
                 lines.append(
-                    f"  [{dim}] region 文件={stats.get('regions', 0)}，"
-                    f"区块={stats.get('chunks', 0)}，错误={stats.get('errors', 0)}"
+                    tr(
+                        "verify.report.dimension_line",
+                        dim=dim,
+                        regions=stats.get("regions", 0),
+                        chunks=stats.get("chunks", 0),
+                        errors=stats.get("errors", 0),
+                    )
                 )
         players = report.get("players") or {}
         lines.append("")
-        lines.append(f"玩家数据：{len(players)} 个")
+        lines.append(tr("verify.report.players", count=len(players)))
         for uuid, info in players.items():
             if isinstance(info, dict) and "error" in info:
-                lines.append(f"  - {uuid}：读取失败 {info['error']}")
+                lines.append(
+                    tr("verify.report.player_error", uuid=uuid, error=info["error"])
+                )
             elif isinstance(info, dict):
                 lines.append(
-                    f"  - {uuid}：维度={info.get('dimension', '?')}，"
-                    f"模式={info.get('game_type', '?')}，DataVersion={info.get('data_version', '?')}"
+                    tr(
+                        "verify.report.player_line",
+                        uuid=uuid,
+                        dim=info.get("dimension", "?"),
+                        mode=info.get("game_type", "?"),
+                        data_version=info.get("data_version", "?"),
+                    )
                 )
 
         warnings = report.get("warnings") or []
         errors = report.get("errors") or []
         if warnings:
             lines.append("")
-            lines.append(f"警告（{len(warnings)} 条）：")
+            lines.append(tr("verify.report.warnings", count=len(warnings)))
             for warning in warnings[:200]:
                 lines.append(f"  ! {warning}")
             if len(warnings) > 200:
-                lines.append(f"  ... 另有 {len(warnings) - 200} 条警告")
+                lines.append(
+                    tr("verify.report.more_warnings", count=len(warnings) - 200)
+                )
         if errors:
             lines.append("")
-            lines.append(f"错误（{len(errors)} 条）：")
+            lines.append(tr("verify.report.errors", count=len(errors)))
             for error in errors[:200]:
                 lines.append(f"  x {error}")
             if len(errors) > 200:
-                lines.append(f"  ... 另有 {len(errors) - 200} 条错误")
+                lines.append(
+                    tr("verify.report.more_errors", count=len(errors) - 200)
+                )
         if not warnings and not errors:
             lines.append("")
-            lines.append("未发现警告或错误。")
+            lines.append(tr("verify.report.no_issues"))
         lines.append("")
-        lines.append(f"（备份目录：{getattr(self.app.world, 'backup_root', '未打开世界')}）")
+        backup_root = (
+            getattr(self.app.world, "backup_root", None)
+            if self.app.world is not None
+            else None
+        )
+        lines.append(
+            tr(
+                "verify.report.backup_dir",
+                path=backup_root if backup_root else tr("status.no_world"),
+            )
+        )
         return "\n".join(lines)
 
 
@@ -3327,7 +3805,7 @@ class VersionChoiceDialog(tk.Toplevel):
         self._error = error
         self._labels: dict[str, str] = {}
 
-        self.title("选择 Minecraft 版本处理方式")
+        self.title(tr("version.dialog.title"))
         self.transient(parent)
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -3336,30 +3814,29 @@ class VersionChoiceDialog(tk.Toplevel):
         body.pack(fill="both", expand=True)
         ttk.Label(
             body,
-            text=f"检测到不受支持的 Minecraft 版本：{error.detected.display}",
+            text=tr("version.dialog.detected", version=error.detected.display),
             font=("Microsoft YaHei UI", 10, "bold"),
         ).pack(anchor="w")
-        supported_text = "、".join(
-            f"{p.id}（{p.status_label}，DataVersion={p.data_version}）"
-            for p in error.supported
+        supported_text = tr("common.list_separator").join(
+            _version_choice_label(p) for p in error.supported
         )
         ttk.Label(
             body,
-            text=f"本程序当前支持的版本：{supported_text}",
+            text=tr("version.dialog.supported", versions=supported_text),
             wraplength=560,
         ).pack(anchor="w", pady=(8, 0))
         ttk.Label(
             body,
-            text=f"请选择用于读写该存档的处理逻辑（默认：版本号最近的受支持版本 {error.nearest.id}）",
+            text=tr("version.dialog.choose", version=error.nearest.id),
             wraplength=560,
         ).pack(anchor="w", pady=(6, 0))
 
         values: list[str] = []
         for profile in error.supported:
-            label = profile.choice_label
+            label = _version_choice_label(profile)
             self._labels[label] = profile.id
             values.append(label)
-        self.choice_var = tk.StringVar(value=error.nearest.choice_label)
+        self.choice_var = tk.StringVar(value=_version_choice_label(error.nearest))
         self.combo = ttk.Combobox(
             body, textvariable=self.choice_var, values=values, state="readonly", width=58,
         )
@@ -3367,16 +3844,19 @@ class VersionChoiceDialog(tk.Toplevel):
 
         ttk.Label(
             body,
-            text="注意：处理版本与存档实际版本不一致时，写入可能有风险；"
-                 "工具会在覆盖前自动备份。",
+            text=tr("version.dialog.warning"),
             style="Hint.TLabel",
             wraplength=560,
         ).pack(anchor="w", pady=(8, 0))
 
         buttons = ttk.Frame(body)
         buttons.pack(fill="x", pady=(14, 0))
-        ttk.Button(buttons, text="使用所选版本打开", command=self._ok).pack(side="right")
-        ttk.Button(buttons, text="取消", command=self._cancel).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            buttons, text=tr("button.use_version"), command=self._ok,
+        ).pack(side="right")
+        ttk.Button(
+            buttons, text=tr("button.cancel"), command=self._cancel,
+        ).pack(side="right", padx=(0, 8))
 
         self.grab_set()
         self.update_idletasks()
@@ -3455,13 +3935,15 @@ class McToolGUI(tk.Tk):
                 # 版本不受支持: 主循环启动后再弹出“选择受支持版本”对话框
                 self.startup_version_error = exc
                 self.set_status(
-                    f"检测到不受支持的版本：{exc.detected.display}，请选择受支持的处理版本"
+                    tr("status.unsupported_version", version=exc.detected.display)
                 )
-                self.lock_var.set("未锁定")
+                self.lock_var.set(tr("status.unlocked"))
             except Exception as exc:  # noqa: BLE001 - 构造阶段不弹框，错误稍后展示
                 self.startup_error = _exc_text(exc)
-                self.set_status(f"打开世界失败：{self.startup_error}")
-                self.lock_var.set("未锁定")
+                self.set_status(
+                    tr("status.open_world_failed", error=self.startup_error)
+                )
+                self.lock_var.set(tr("status.unlocked"))
 
     # ------------------------------------------------------------------ #
     # 初始化
@@ -3505,17 +3987,19 @@ class McToolGUI(tk.Tk):
         toolbar = ttk.Frame(self, padding=(10, 8, 10, 2))
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.columnconfigure(1, weight=1)
-        ttk.Label(toolbar, text="世界目录：").grid(row=0, column=0, sticky="w")
+        ttk.Label(toolbar, text=_label(tr("app.label.world_dir"))).grid(
+            row=0, column=0, sticky="w"
+        )
         self.world_path_var = tk.StringVar()
         self.world_path_entry = ttk.Entry(toolbar, textvariable=self.world_path_var)
         self.world_path_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         self.world_path_entry.bind("<Return>", lambda _e: self._ui_open_typed())
         self.open_world_button = ttk.Button(
-            toolbar, text="打开世界...", command=self._ui_open_world,
+            toolbar, text=tr("button.open_world"), command=self._ui_open_world,
         )
         self.open_world_button.grid(row=0, column=2)
         self.open_typed_button = ttk.Button(
-            toolbar, text="打开路径", command=self._ui_open_typed,
+            toolbar, text=tr("button.open_path"), command=self._ui_open_typed,
         )
         self.open_typed_button.grid(row=0, column=3, padx=(6, 0))
 
@@ -3524,19 +4008,18 @@ class McToolGUI(tk.Tk):
         hint_bar.columnconfigure(0, weight=1)
         ttk.Label(
             hint_bar,
-            text="提示：打开世界后工具独占 session.lock；关闭窗口或“文件 → 关闭世界”时释放。"
-                 "修改立即落盘并自动备份。",
+            text=tr("app.hint.lock"),
             style="Hint.TLabel",
         ).grid(row=0, column=0, sticky="w")
-        self.lock_var = tk.StringVar(value="未锁定")
+        self.lock_var = tk.StringVar(value=tr("status.unlocked"))
         self.lock_label = ttk.Label(
             hint_bar, textvariable=self.lock_var, foreground="#b06a00", anchor="e",
         )
         self.lock_label.grid(row=0, column=1, sticky="e", padx=(12, 0))
 
         # ---- 中部标签页 -------------------------------------------------- #
-        self.status_var = tk.StringVar(value="就绪")
-        self.backup_var = tk.StringVar(value="备份：无")
+        self.status_var = tk.StringVar(value=tr("status.ready"))
+        self.backup_var = tk.StringVar(value=tr("status.backup_none"))
 
         self.notebook = ttk.Notebook(self)
         self.notebook.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 4))
@@ -3553,12 +4036,8 @@ class McToolGUI(tk.Tk):
             self.world_tab, self.block_tab, self.search_tab, self.be_search_tab,
             self.player_tab, self.moddata_tab, self.nbt_tab, self.verify_tab,
         ]
-        tab_titles = [
-            "世界信息", "方块 / 方块实体", "方块搜索", "方块实体搜索",
-            "玩家数据", "模组数据", "原始 NBT", "校验 / 备份",
-        ]
-        for tab, title in zip(self.tabs, tab_titles):
-            self.notebook.add(tab, text=title)
+        for tab in self.tabs:
+            self.notebook.add(tab, text=tab.title)
         self.tabs_by_name: dict[str, _Tab] = {
             "world": self.world_tab,
             "block": self.block_tab,
@@ -3588,16 +4067,16 @@ class McToolGUI(tk.Tk):
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="打开世界...", command=self._ui_open_world)
-        file_menu.add_command(label="打开路径", command=self._ui_open_typed)
-        file_menu.add_command(label="关闭世界", command=self._ui_close_world)
+        file_menu.add_command(label=tr("button.open_world"), command=self._ui_open_world)
+        file_menu.add_command(label=tr("button.open_path"), command=self._ui_open_typed)
+        file_menu.add_command(label=tr("menu.close_world"), command=self._ui_close_world)
         file_menu.add_separator()
-        file_menu.add_command(label="退出", command=self.on_close)
-        menubar.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label=tr("menu.exit"), command=self.on_close)
+        menubar.add_cascade(label=tr("menu.file"), menu=file_menu)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="关于", command=self._ui_about)
-        menubar.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label=tr("menu.about"), command=self._ui_about)
+        menubar.add_cascade(label=tr("menu.help"), menu=help_menu)
         self.config(menu=menubar)
 
     def _select_initial_tab(self, initial_tab: int) -> None:
@@ -3624,12 +4103,12 @@ class McToolGUI(tk.Tk):
         try:
             selected = filedialog.askdirectory(
                 parent=self,
-                title="选择 Minecraft 世界目录（包含 level.dat）",
+                title=tr("app.dialog.choose_world_dir"),
                 initialdir=initial,
                 mustexist=True,
             )
         except Exception as exc:  # noqa: BLE001
-            self.show_error("选择世界目录失败", exc)
+            self.show_error(tr("dialog.error.select_world_dir.title"), exc)
             return
         if selected:
             self._ui_open_path(selected)
@@ -3637,7 +4116,10 @@ class McToolGUI(tk.Tk):
     def _ui_open_typed(self) -> None:
         path = self.world_path_var.get().strip().strip('"').strip("'")
         if not path:
-            self.show_error("打开世界失败", ValueError("请先填写世界目录路径。"))
+            self.show_error(
+                tr("dialog.error.open_world.title"),
+                ValueError(tr("app.error.path_empty")),
+            )
             return
         self._ui_open_path(path)
 
@@ -3648,30 +4130,36 @@ class McToolGUI(tk.Tk):
             choice = self._ask_version(exc)
             if not choice:
                 self.set_status(
-                    f"已取消打开：检测到不受支持的版本 {exc.detected.display}"
+                    tr("status.open_cancelled", version=exc.detected.display)
                 )
-                self.lock_var.set("未锁定")
+                self.lock_var.set(tr("status.unlocked"))
                 return
             try:
                 self.open_world(path, mc_version=choice)
             except Exception as exc2:  # noqa: BLE001 - UI 边界
-                self.show_error("打开世界失败", exc2)
+                self.show_error(tr("dialog.error.open_world.title"), exc2)
                 return
         except Exception as exc:  # noqa: BLE001 - UI 边界
-            self.show_error("打开世界失败", exc)
+            self.show_error(tr("dialog.error.open_world.title"), exc)
             return
         world = self.world
         if world is None:
-            self.set_status("打开世界失败：未知错误")
+            self.set_status(tr("status.open_world_failed_unknown"))
             return
         self.set_status(
-            f"已打开世界：{world.path}（检测版本 {world.detected_version.display}，"
-            f"处理版本 {world.version_profile.id}）"
+            tr(
+                "status.world_opened_detail",
+                path=world.path,
+                detected=world.detected_version.display,
+                profile=world.version_profile.id,
+            )
         )
         if world.version_warnings:
             try:
                 messagebox.showwarning(
-                    "版本不一致警告", "\n".join(world.version_warnings), parent=self,
+                    tr("dialog.warning.version.title"),
+                    "\n".join(world.version_warnings),
+                    parent=self,
                 )
             except tk.TclError:
                 pass
@@ -3686,37 +4174,40 @@ class McToolGUI(tk.Tk):
         try:
             self.close_world()
         except Exception as exc:  # noqa: BLE001
-            self.show_error("关闭世界失败", exc)
+            self.show_error(tr("dialog.error.close_world.title"), exc)
             return
-        self.set_status("已关闭世界，session.lock 已释放")
+        self.set_status(tr("status.world_closed"))
 
     def _ui_about(self) -> None:
-        supported = "、".join(
-            f"{p.id}（{p.status_label}）" for p in SUPPORTED_VERSIONS.values()
+        supported = tr("common.list_separator").join(
+            tr(
+                "world.info.selected_version_format",
+                id=p.id,
+                status=_version_status_label(p),
+            )
+            for p in SUPPORTED_VERSIONS.values()
         )
         messagebox.showinfo(
-            "关于 mctool",
-            f"{APP_TITLE}\n"
-            f"支持的 Minecraft 版本：{supported}\n"
-            f"主目标版本：1.21.1（DataVersion=3955）\n\n"
-            "打开世界时会自动识别存档版本：受支持则自动选择对应处理逻辑；\n"
-            "不受支持时会让你从受支持版本中选择（默认版本号最近的版本）。\n\n"
-            "纯 Python 标准库 + tkinter/ttk 实现，不联网。\n"
-            "通过 session.lock 独占锁保证不会与游戏同时写存档；\n"
-            "每次写入前自动备份，备份路径显示在状态栏。\n\n"
-            "功能：世界信息 / 方块与方块实体 / 方块搜索 / 方块实体搜索 / 玩家数据 / "
-            "模组数据（Curios）/ 原始 NBT / 校验与备份。\n\n"
-            "模组数据子标签页会标注适用的模组/游戏/加载器版本；版本偏差可能导致未定义行为。",
+            tr("app.about.title"),
+            tr(
+                "app.about.body",
+                app_title=APP_TITLE,
+                supported=supported,
+            ),
             parent=self,
         )
 
     def _show_backup_details(self, _event: "tk.Event | None" = None) -> None:
         if not self.last_backups:
-            messagebox.showinfo("备份", "本次会话还没有产生备份。", parent=self)
+            messagebox.showinfo(
+                tr("dialog.info.backup.title"),
+                tr("dialog.info.no_backup"),
+                parent=self,
+            )
             return
         messagebox.showinfo(
-            "备份路径",
-            "最近一次写入产生的备份：\n\n" + "\n".join(self.last_backups),
+            tr("dialog.info.backup_paths.title"),
+            tr("dialog.info.backup_paths.body") + "\n".join(self.last_backups),
             parent=self,
         )
 
@@ -3733,10 +4224,10 @@ class McToolGUI(tk.Tk):
         若之前已打开另一个世界，失败时保留原世界不变。
         """
         if path is None:
-            raise ValueError("世界路径不能为空")
+            raise ValueError(tr("app.error.world_path_empty"))
         text = str(path).strip().strip('"').strip("'")
         if not text:
-            raise ValueError("世界路径不能为空")
+            raise ValueError(tr("app.error.world_path_empty"))
 
         previous = self.world
         same_world = False
@@ -3761,11 +4252,11 @@ class McToolGUI(tk.Tk):
                 pass
         self.world = world
         self.world_path_var.set(world.path)
-        self.lock_var.set("已锁定（session.lock）")
+        self.lock_var.set(tr("status.locked"))
         self.last_backups = []
-        self.backup_var.set("备份：无")
+        self.backup_var.set(tr("status.backup_none"))
         self._refresh_all_tabs()
-        self.set_status(f"已打开世界：{world.path}")
+        self.set_status(tr("status.world_opened", path=world.path))
         return world.info()
 
     def close_world(self) -> None:
@@ -3776,22 +4267,24 @@ class McToolGUI(tk.Tk):
             if world is not None:
                 world.close()
         finally:
-            self.lock_var.set("未锁定")
+            self.lock_var.set(tr("status.unlocked"))
             self.last_backups = []
-            self.backup_var.set("备份：无")
+            self.backup_var.set(tr("status.backup_none"))
             self._refresh_all_tabs()
 
     def reload_level(self) -> None:
         """重新从磁盘读取 level.dat（用于原始 NBT 修改后刷新世界页）。"""
         world = self.world
         if world is None:
-            raise RuntimeError("尚未打开世界，无法重新读取 level.dat。")
+            raise RuntimeError(tr("app.error.no_world_reload"))
         try:
             world.reload_level()
         except Exception as exc:
-            raise WorldError(f"重新读取 level.dat 失败：{_exc_text(exc)}") from exc
+            raise WorldError(
+                tr("app.error.reload_level_failed", error=_exc_text(exc))
+            ) from exc
         self.world_tab.refresh()
-        self.set_status("已重新读取 level.dat")
+        self.set_status(tr("status.level_reloaded"))
 
     def run_background(
         self,
@@ -3806,7 +4299,7 @@ class McToolGUI(tk.Tk):
         if self._closing:
             return
         if not callable(fn) or not callable(on_done):
-            raise TypeError("run_background 需要可调用的 fn 与 on_done")
+            raise TypeError(tr("app.error.run_background_args"))
 
         self._bg_pending += 1
 
@@ -3840,15 +4333,17 @@ class McToolGUI(tk.Tk):
         items = [str(p) for p in (paths or []) if p]
         self.last_backups = items
         if not items:
-            self.backup_var.set("备份：无")
+            self.backup_var.set(tr("status.backup_none"))
             return
         latest = items[-1]
         if len(latest) > 80:
             latest = "…" + latest[-79:]
         if len(items) == 1:
-            self.backup_var.set(f"备份：{latest}")
+            self.backup_var.set(tr("status.backup_one", path=latest))
         else:
-            self.backup_var.set(f"备份：{latest}（共 {len(items)} 个文件）")
+            self.backup_var.set(
+                tr("status.backup_many", path=latest, count=len(items))
+            )
 
     def select_tab(self, index: int) -> None:
         """切换标签页（0..7）。"""
@@ -3865,10 +4360,10 @@ class McToolGUI(tk.Tk):
         for tab in self.tabs:
             if name in (tab.title.lower(), type(tab).__name__.lower()):
                 return tab
-        raise KeyError(f"未知标签页：{key!r}")
+        raise KeyError(tr("app.error.unknown_tab", key=repr(key)))
 
     def show_error(self, title: str, exc: BaseException) -> None:
-        """显示中文错误对话框（仅在 UI 回调边界使用）。"""
+        """显示错误对话框（仅在 UI 回调边界使用）。"""
         if self._closing:
             return
         try:
@@ -3884,7 +4379,9 @@ class McToolGUI(tk.Tk):
             try:
                 tab.refresh()
             except Exception as exc:  # noqa: BLE001 - 单个标签页失败不影响其它
-                self.set_status(f"刷新“{tab.title}”失败：{_exc_text(exc)}")
+                self.set_status(
+                    tr("status.refresh_tab_failed", tab=tab.title, error=_exc_text(exc))
+                )
 
     def _poll_background(self) -> None:
         self._bg_after = None
@@ -3975,28 +4472,26 @@ class McToolGUI(tk.Tk):
 # 命令行入口
 # --------------------------------------------------------------------------- #
 def build_arg_parser() -> argparse.ArgumentParser:
+    versions = tr("common.list_separator").join(SUPPORTED_VERSIONS.keys())
     parser = argparse.ArgumentParser(
         prog="python -m mctool.gui",
-        description="mctool 图形界面（Tkinter）：Minecraft 存档读取/修改工具（自动识别版本；"
-                    "支持 " + "、".join(SUPPORTED_VERSIONS.keys()) + "）。",
+        description=tr("app.cli.description", versions=versions),
     )
     parser.add_argument(
         "--world", "-w", default=os.environ.get("MCTOOL_WORLD"),
-        help="启动时自动打开的世界目录（包含 level.dat）；也可用环境变量 MCTOOL_WORLD",
+        help=tr("app.cli.world_help"),
     )
     parser.add_argument(
         "--tab", "-t", type=int, default=0,
-        help="初始标签页索引：0=世界信息 1=方块 2=方块搜索 3=方块实体搜索 "
-             "4=玩家 5=模组数据 6=原始 NBT 7=校验/备份",
+        help=tr("app.cli.tab_help"),
     )
     parser.add_argument(
         "--mc-version", default=None, metavar="VERSION",
-        help="存档版本不受支持时，指定使用哪个受支持版本的处理逻辑（如 1.21.1）；"
-             "受支持的存档会自动识别，无需此参数。",
+        help=tr("app.cli.mc_version_help"),
     )
     parser.add_argument(
         "--self-test", action="store_true",
-        help="启动后自动关闭窗口并打印检查结果（用于自动化验收）",
+        help=tr("app.cli.self_test_help"),
     )
     parser.add_argument(
         "--self-test-ms", type=int, default=1500, help=argparse.SUPPRESS,
@@ -4020,7 +4515,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             world_path=args.world, initial_tab=args.tab, mc_version=args.mc_version,
         )
     except tk.TclError as exc:
-        print(f"错误：无法初始化 Tk 图形界面（可能没有可用的桌面环境）：{exc}", file=sys.stderr)
+        print(
+            tr("app.error.tk_init", error=exc),
+            file=sys.stderr,
+        )
         return 1
 
     startup_ok = app.world is not None
@@ -4030,7 +4528,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         app.after(150, lambda: app._ui_open_path(args.world))
     elif args.world and app.world is None and app.startup_error:
         try:
-            messagebox.showerror("打开世界失败", app.startup_error, parent=app)
+            messagebox.showerror(
+                tr("dialog.error.open_world.title"), app.startup_error, parent=app,
+            )
         except Exception:  # noqa: BLE001
             pass
 
