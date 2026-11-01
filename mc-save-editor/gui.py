@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
 import math
 import os
@@ -47,6 +48,21 @@ from .nbt import (
     to_snbt_pretty,
 )
 from .palette import BlockState
+from .backpacks import (
+    BACKPACK_DATA_PATH,
+    Backpack,
+    BackpackStore,
+    list_backpacks,
+)
+from .infinity_cells import (
+    INFINITY_DATA_PATH,
+    CellEntry,
+    InfinityCell,
+    InfinityCellStore,
+    key_description,
+    key_id,
+    list_cells,
+)
 from .curios import (
     CURIO_MC_VERSION,
     CURIO_MOD_VERSION,
@@ -82,6 +98,10 @@ __all__ = [
     "WorldTab",
     "BlockTab",
     "PlayerTab",
+    "ModDataTab",
+    "CuriosTab",
+    "BackpacksTab",
+    "InfinityCellsTab",
     "NbtTab",
     "VerifyTab",
     "main",
@@ -286,6 +306,87 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
+
+
+def _backup_status_text(backups: list[str]) -> str:
+    """把核心层返回的备份列表转成状态文案。"""
+    if backups:
+        return tr("status.backup_count", count=len(backups))
+    return tr("status.written")
+
+
+def _build_version_banner(
+    parent: ttk.Frame,
+    *,
+    prefix: str,
+    mod_version: str,
+    game_version: str,
+    loader_version: str,
+    data_path: str,
+) -> tk.StringVar:
+    """构建模组子标签页顶部的版本标注/警告横幅（参考 Curios 样式）。
+
+    返回“当前世界处理版本偏差”提示所使用的 StringVar。
+    """
+    parent.columnconfigure(0, weight=1)
+    ttk.Label(
+        parent,
+        text=tr(f"{prefix}.banner.mod", version=mod_version),
+        font=("Microsoft YaHei UI", 10, "bold"),
+    ).grid(row=0, column=0, sticky="w")
+    ttk.Label(
+        parent,
+        text=tr(
+            f"{prefix}.banner.versions",
+            game=game_version,
+            loader=loader_version,
+        ),
+        style="Hint.TLabel",
+    ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+    ttk.Label(
+        parent,
+        text=tr(f"{prefix}.warning.version"),
+        style="Warn.TLabel",
+        wraplength=1100,
+        justify="left",
+    ).grid(row=2, column=0, sticky="w", pady=(3, 0))
+    mismatch_var = tk.StringVar()
+    ttk.Label(
+        parent,
+        textvariable=mismatch_var,
+        style="Warn.TLabel",
+        wraplength=1100,
+        justify="left",
+    ).grid(row=3, column=0, sticky="w", pady=(2, 0))
+    ttk.Label(
+        parent,
+        text=tr(f"{prefix}.hint.data_path", path=data_path),
+        style="Hint.TLabel",
+        wraplength=1100,
+        justify="left",
+    ).grid(row=4, column=0, sticky="w", pady=(2, 0))
+    ttk.Label(
+        parent,
+        text=tr(f"{prefix}.warning.backup"),
+        style="Hint.TLabel",
+        wraplength=1100,
+        justify="left",
+    ).grid(row=5, column=0, sticky="w", pady=(2, 0))
+    return mismatch_var
+
+
+def _parse_positive_big_integer(text: Any) -> int:
+    """解析十进制大整数数量（不使用 float，支持超过 64 位的整数）。"""
+    raw = str(text).strip()
+    if raw == "":
+        raise ValueError(tr("error.field_empty", field=tr("common.heading.count")))
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        raise ValueError(tr("infinity_cells.error.amount_not_int")) from None
+    if value <= 0:
+        raise ValueError(tr("infinity_cells.error.amount_not_positive"))
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -2671,7 +2772,7 @@ class InventoryEditorDialog(tk.Toplevel):
 
 
 # --------------------------------------------------------------------------- #
-# 模组数据页（子标签页：Curios）
+# 模组数据页（子标签页：Curios、Backpacks、Infinity Cells）
 # --------------------------------------------------------------------------- #
 class ModDataTab(_Tab):
     """模组扩展数据页；每个子标签页自行标注模组/游戏/加载器版本。"""
@@ -2685,9 +2786,135 @@ class ModDataTab(_Tab):
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         self.curios_tab = CuriosTab(self.notebook, self.app)
         self.notebook.add(self.curios_tab, text=tr("tab.curios"))
+        self.backpacks_tab = BackpacksTab(self.notebook, self.app)
+        self.notebook.add(self.backpacks_tab, text=tr("tab.backpacks"))
+        self.infinity_cells_tab = InfinityCellsTab(self.notebook, self.app)
+        self.notebook.add(self.infinity_cells_tab, text=tr("tab.infinity_cells"))
+        # 便于脚本/测试访问的简短别名
+        self.backpacks = self.backpacks_tab
+        self.infinity_cells = self.infinity_cells_tab
+
+        # 模组数据可能包含很大的 SavedData 文件；不要在打开世界时同步读取，
+        # 否则主线程会卡住。仅在进入“模组数据”并选中具体子页时按需加载。
+        self._loaded_key: Optional[tuple[str, int]] = None
+        self._loading = False
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_subtab_changed, add="+")
+        try:
+            self.app.notebook.bind("<<NotebookTabChanged>>", self._on_main_tab_changed, add="+")
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _sub_tabs(self) -> tuple[_Tab, ...]:
+        return (self.curios_tab, self.backpacks_tab, self.infinity_cells_tab)
+
+    def _on_main_tab_changed(self, _event: "tk.Event | None" = None) -> None:
+        if self.app.world is None:
+            return
+        try:
+            selected = self.app.notebook.select()
+        except tk.TclError:
+            return
+        if selected and str(selected) == str(self):
+            self._ensure_selected_loaded()
+
+    def _on_subtab_changed(self, _event: "tk.Event | None" = None) -> None:
+        if self.app.world is None:
+            return
+        self._ensure_selected_loaded()
+
+    def ensure_loaded(self) -> None:
+        """公开入口：如果模组数据页可见，按当前选中子页加载。"""
+        self._ensure_selected_loaded()
+
+    def _ensure_selected_loaded(self) -> None:
+        if self._loading or self.app.world is None:
+            return
+        try:
+            index = self.notebook.index(self.notebook.select())
+        except tk.TclError:
+            return
+        tabs = self._sub_tabs()
+        if not 0 <= index < len(tabs):
+            return
+        world = self.app.world
+        key = (world.path, index)
+        if self._loaded_key == key:
+            return
+        tab = tabs[index]
+        if isinstance(tab, (BackpacksTab, InfinityCellsTab)):
+            # 背包/无限存储的 SavedData 可能很大；放到后台线程读，主线程只做 UI。
+            self._loading = True
+
+            def on_done(result: Any) -> None:
+                self._loading = False
+                if isinstance(result, BaseException):
+                    self.app.set_status(
+                        tr("status.refresh_tab_failed", tab=tab.title, error=_exc_text(result))
+                    )
+                elif self.app.world is world:
+                    try:
+                        still_selected = (
+                            self.app.notebook.select()
+                            and str(self.app.notebook.select()) == str(self)
+                            and int(self.notebook.index(self.notebook.select())) == index
+                        )
+                    except tk.TclError:
+                        still_selected = False
+                    if still_selected:
+                        try:
+                            tab.apply_store(result)
+                            self._loaded_key = key
+                        except Exception as exc:  # noqa: BLE001 - UI 边界
+                            self.app.set_status(
+                                tr(
+                                    "status.refresh_tab_failed",
+                                    tab=tab.title,
+                                    error=_exc_text(exc),
+                                )
+                            )
+                # 如果加载期间切换了子页/世界，再补加载当前选中项
+                self._ensure_selected_loaded()
+
+            try:
+                self.app.run_background(
+                    tab.load_store, on_done, description=f"mod-data-{tab.title}",
+                )
+            except Exception as exc:  # noqa: BLE001 - 后台调度失败
+                self._loading = False
+                self.app.set_status(
+                    tr("status.refresh_tab_failed", tab=tab.title, error=_exc_text(exc))
+                )
+            return
+        self._loading = True
+        try:
+            tab.refresh()
+            self._loaded_key = key
+        except Exception as exc:  # noqa: BLE001 - 单个子页失败不影响其它子页
+            self.app.set_status(
+                tr("status.refresh_tab_failed", tab=tab.title, error=_exc_text(exc))
+            )
+        finally:
+            self._loading = False
 
     def refresh(self) -> None:
-        self.curios_tab.refresh()
+        world = self.app.world
+        if world is None:
+            self._loaded_key = None
+            for tab in self._sub_tabs():
+                try:
+                    tab.refresh()
+                except Exception as exc:  # noqa: BLE001
+                    self.app.set_status(
+                        tr("status.refresh_tab_failed", tab=tab.title, error=_exc_text(exc))
+                    )
+            return
+        # 打开/切换世界时只标记失效，不在这里读 data/*.dat。
+        self._loaded_key = None
+        try:
+            if self.app.notebook.select() and str(self.app.notebook.select()) == str(self):
+                self._ensure_selected_loaded()
+        except tk.TclError:
+            pass
 
 
 class CuriosTab(_Tab):
@@ -3232,6 +3459,1206 @@ class CuriosTab(_Tab):
 
 
 # --------------------------------------------------------------------------- #
+# 模组数据子页：Sophisticated Backpacks
+# --------------------------------------------------------------------------- #
+BACKPACK_MOD_VERSION = "3.26.19"
+BACKPACK_GAME_VERSION = "1.21.1"
+BACKPACK_LOADER_VERSION = "21.1.229"
+
+
+class BackpacksTab(_Tab):
+    """Sophisticated Backpacks 背包内容（SavedData）读取/修改。
+
+    版本标注为工作区 Sophisticated Backpacks 源码的构建元数据：
+      - Sophisticated Backpacks 3.26.19
+      - Minecraft 1.21.1
+      - NeoForge 21.1.229
+    """
+
+    title_key = "tab.backpacks"
+    MOD_NAME = "Sophisticated Backpacks"
+    MOD_VERSION = BACKPACK_MOD_VERSION
+    GAME_VERSION = BACKPACK_GAME_VERSION
+    LOADER_VERSION = BACKPACK_LOADER_VERSION
+    DATA_PATH = BACKPACK_DATA_PATH
+
+    def _build(self) -> None:
+        self.store: Optional[BackpackStore] = None
+        self.backpacks: list[Backpack] = []
+        self.current: Optional[Backpack] = None
+        self._current_slot: Optional[int] = None
+        self._suppress_select = False
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+
+        # ---- 版本标注 / 警告 --------------------------------------------- #
+        banner = ttk.Frame(self, padding=(8, 6, 8, 0))
+        banner.grid(row=0, column=0, sticky="ew")
+        self.mismatch_var = _build_version_banner(
+            banner,
+            prefix="backpacks",
+            mod_version=self.MOD_VERSION,
+            game_version=self.GAME_VERSION,
+            loader_version=self.LOADER_VERSION,
+            data_path=self.DATA_PATH,
+        )
+
+        # ---- 背包选择 ---------------------------------------------------- #
+        bar = ttk.Frame(self, padding=(8, 6))
+        bar.grid(row=1, column=0, sticky="ew")
+        bar.columnconfigure(3, weight=1)
+        ttk.Label(bar, text=_label(tr("backpacks.label.backpack"))).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.backpack_var = tk.StringVar()
+        self.backpack_combo = ttk.Combobox(
+            bar, textvariable=self.backpack_var, state="readonly", width=44,
+        )
+        self.backpack_combo.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self.backpack_combo.bind("<<ComboboxSelected>>", self._on_backpack_change)
+        ttk.Button(
+            bar, text=tr("button.reload"), command=self._ui_reload,
+        ).grid(row=0, column=2, sticky="w")
+        self.info_var = tk.StringVar(value=tr("common.no_world"))
+        ttk.Label(
+            bar, textvariable=self.info_var, style="Hint.TLabel",
+            wraplength=720, justify="left",
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        # ---- 槽位列表 / 编辑表单 ----------------------------------------- #
+        body = ttk.Frame(self, padding=(8, 0, 8, 4))
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(body, text=tr("backpacks.slots_box"), padding=6)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.rowconfigure(0, weight=1)
+        left.columnconfigure(0, weight=1)
+        columns = ("slot", "item", "count", "extra")
+        headings = {
+            "slot": tr("common.heading.slot"),
+            "item": tr("common.heading.item_id"),
+            "count": tr("common.heading.count"),
+            "extra": tr("common.heading.extra_nbt"),
+        }
+        widths = {"slot": 90, "item": 200, "count": 60, "extra": 230}
+        self.slots_tree = ttk.Treeview(
+            left, columns=columns, show="headings", height=18, selectmode="browse",
+        )
+        self.tree = self.slots_tree  # 与 CuriosTab/InventoryEditorDialog 一致的别名
+        for column in columns:
+            self.slots_tree.heading(column, text=headings[column])
+            self.slots_tree.column(column, width=widths[column], anchor="w")
+        self.slots_tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.slots_tree.yview)
+        hscroll = ttk.Scrollbar(left, orient="horizontal", command=self.slots_tree.xview)
+        self.slots_tree.configure(yscrollcommand=scroll.set, xscrollcommand=hscroll.set)
+        scroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        self.slots_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        right = ttk.LabelFrame(body, text=tr("backpacks.editor_box"), padding=8)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(1, weight=1)
+        right.rowconfigure(4, weight=1)
+
+        ttk.Label(right, text=tr("common.label.current_slot")).grid(
+            row=0, column=0, sticky="w", pady=2
+        )
+        self.slot_var = tk.StringVar(value=tr("common.not_selected"))
+        ttk.Label(
+            right, textvariable=self.slot_var, style="Hint.TLabel",
+            wraplength=360, justify="left",
+        ).grid(row=0, column=1, sticky="w", pady=2)
+
+        ttk.Label(right, text=tr("common.label.item_id")).grid(
+            row=1, column=0, sticky="w", pady=2
+        )
+        self.id_var = tk.StringVar()
+        self.id_entry = ttk.Entry(right, textvariable=self.id_var)
+        self.id_entry.grid(row=1, column=1, sticky="ew", pady=2)
+
+        ttk.Label(right, text=tr("common.label.count")).grid(
+            row=2, column=0, sticky="w", pady=2
+        )
+        self.count_var = tk.StringVar(value="1")
+        self.count_entry = ttk.Entry(right, textvariable=self.count_var, width=12)
+        self.count_entry.grid(row=2, column=1, sticky="w", pady=2)
+
+        self.extra_label_var = tk.StringVar(
+            value=tr("common.label.extra_nbt_snbt", tag="components")
+        )
+        ttk.Label(right, textvariable=self.extra_label_var).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(6, 2),
+        )
+        self.extra_editor = ScrolledText(
+            right, height=12, wrap="word", undo=False, font=self.app.mono_font,
+        )
+        self.extra_editor.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        ttk.Label(
+            right, text=tr("inventory.hint.extra"),
+            style="Hint.TLabel", wraplength=380, justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        buttons = ttk.Frame(right)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.save_button = ttk.Button(
+            buttons, text=tr("button.save_slot"), style="Accent.TButton",
+            command=self._ui_save,
+        )
+        self.save_button.pack(side="left")
+        self.delete_button = ttk.Button(
+            buttons, text=tr("button.delete_slot"), command=self._ui_delete,
+        )
+        self.delete_button.pack(side="left", padx=(8, 0))
+        ttk.Button(
+            buttons, text=tr("button.reload"), command=self._ui_reload,
+        ).pack(side="left", padx=(8, 0))
+
+        self.status_var = tk.StringVar(value=tr("common.status.select_slot_hint"))
+        ttk.Label(
+            right, textvariable=self.status_var, style="Hint.TLabel",
+            wraplength=380, justify="left",
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    # ---- 加载 / 展示 ----------------------------------------------------- #
+    def _update_mismatch(self, world: Optional[World]) -> None:
+        if world is not None and world.version_profile.id != self.GAME_VERSION:
+            self.mismatch_var.set(
+                tr(
+                    "backpacks.mismatch",
+                    version=world.version_profile.id,
+                    game=self.GAME_VERSION,
+                )
+            )
+        else:
+            self.mismatch_var.set("")
+
+    def _update_info(self) -> None:
+        if self.current is not None:
+            self.info_var.set(
+                tr(
+                    "backpacks.info.summary",
+                    count=len(self.backpacks),
+                    uuid=self.current.uuid,
+                    size=self.current.size,
+                    items=self.current.item_count(),
+                )
+            )
+        elif self.backpacks:
+            self.info_var.set(
+                tr("backpacks.info.summary_short", count=len(self.backpacks))
+            )
+        else:
+            self.info_var.set(
+                tr("backpacks.info.no_data", path=self.DATA_PATH)
+            )
+
+    def _clear_table(self) -> None:
+        self._suppress_select = True
+        try:
+            self.slots_tree.delete(*self.slots_tree.get_children())
+        finally:
+            self._suppress_select = False
+
+    def _clear_editor(self) -> None:
+        self._current_slot = None
+        self.slot_var.set(tr("common.not_selected"))
+        self.id_var.set("")
+        self.count_var.set("1")
+        _set_text(self.extra_editor, "", readonly=False)
+        try:
+            self.delete_button.configure(state="disabled")
+        except tk.TclError:
+            pass
+
+    def load_store(self) -> BackpackStore:
+        """后台线程入口：只读 data/*.dat，不触碰 Tk。"""
+        return list_backpacks(self.require_world())
+
+    def apply_store(
+        self, store: BackpackStore, select_uuid: Optional[str] = None,
+    ) -> list[Backpack]:
+        """主线程入口：把已读取的 store 应用到界面。"""
+        self.store = store
+        self.backpacks = list(store.backpacks)
+        values = [backpack.uuid for backpack in self.backpacks]
+        active = select_uuid or self.backpack_var.get()
+        if active not in values:
+            active = values[0] if values else ""
+        self.backpack_combo.configure(values=values)
+        self.backpack_var.set(active)
+        if active:
+            self.select_backpack(active)
+        else:
+            self.current = None
+            self._clear_table()
+            self._clear_editor()
+            self._update_info()
+        return self.backpacks
+
+    def reload_data(self, select_uuid: Optional[str] = None) -> list[Backpack]:
+        """同步重新读取并刷新（脚本/按钮使用）；打开世界时由 ModDataTab 异步调用。"""
+        return self.apply_store(self.load_store(), select_uuid)
+
+    def refresh(self) -> None:
+        world = self.app.world
+        self._update_mismatch(world)
+        if world is None:
+            self.store = None
+            self.backpacks = []
+            self.current = None
+            self.backpack_combo.configure(values=[])
+            self.backpack_var.set("")
+            self.info_var.set(tr("common.no_world"))
+            self._clear_table()
+            self._clear_editor()
+            self.status_var.set(tr("status.no_world"))
+            return
+        try:
+            self.reload_data()
+            self.status_var.set(tr("backpacks.status.loaded", uuid=self.backpack_var.get() or "—"))
+        except Exception as exc:  # noqa: BLE001 - 刷新失败不应让整个页面崩溃
+            self.store = None
+            self.backpacks = []
+            self.current = None
+            self.backpack_combo.configure(values=[])
+            self.backpack_var.set("")
+            self._clear_table()
+            self._clear_editor()
+            self.info_var.set(
+                tr("backpacks.info.load_failed", error=_exc_text(exc))
+            )
+            self.status_var.set(
+                tr("backpacks.info.load_failed", error=_exc_text(exc))
+            )
+
+    def refresh_backpacks(self) -> None:
+        """刷新背包数据（refresh 的别名，便于脚本调用）。"""
+        self.refresh()
+
+    def select_backpack(self, uuid: str) -> Backpack:
+        """选中一个背包并刷新槽位列表。"""
+        world = self.require_world()
+        store = self.store if self.store is not None else list_backpacks(world)
+        backpack = store.get(str(uuid))
+        if backpack is None:
+            raise ValueError(tr("backpacks.error.no_backpack", uuid=uuid))
+        self.store = store
+        self.current = backpack
+        self.backpack_var.set(backpack.uuid)
+        self._update_info()
+        self._reload_slots()
+        self.status_var.set(tr("backpacks.status.loaded", uuid=backpack.uuid))
+        return backpack
+
+    # ---- 槽位表格 / 编辑器 ----------------------------------------------- #
+    def _reload_slots(self, select_slot: Optional[int] = None) -> None:
+        self._suppress_select = True
+        target: Optional[int] = None
+        try:
+            self.slots_tree.delete(*self.slots_tree.get_children())
+            if self.current is None:
+                self._clear_editor()
+                return
+            item_format = (
+                self.app.world.version_profile.item_format
+                if self.app.world is not None else "components"
+            )
+            for slot, item in self.current.slot_items():
+                iid = str(slot)
+                if item is None:
+                    values = (
+                        tr(
+                            "backpacks.slot_display",
+                            index=slot + 1, size=self.current.size,
+                        ),
+                        "—", "", "",
+                    )
+                else:
+                    extra = item_extra(item, item_format)
+                    preview = ""
+                    if extra is not None and len(extra) > 0:
+                        preview = to_snbt(extra)
+                        if len(preview) > 90:
+                            preview = preview[:87] + "..."
+                    values = (
+                        tr(
+                            "backpacks.slot_display",
+                            index=slot + 1, size=self.current.size,
+                        ),
+                        item_id(item),
+                        str(item_count(item, item_format)),
+                        preview,
+                    )
+                self.slots_tree.insert("", "end", iid=iid, values=values)
+            if select_slot is not None and self.slots_tree.exists(str(select_slot)):
+                target = select_slot
+            elif self._current_slot is not None and self.slots_tree.exists(
+                str(self._current_slot)
+            ):
+                target = self._current_slot
+            elif self.slots_tree.get_children():
+                target = int(self.slots_tree.get_children()[0])
+            if target is not None:
+                self.slots_tree.selection_set(str(target))
+                self.slots_tree.see(str(target))
+        finally:
+            self._suppress_select = False
+        if target is not None:
+            self._load_slot(target)
+        else:
+            self._clear_editor()
+
+    def _on_tree_select(self, _event: "tk.Event | None" = None) -> None:
+        if self._suppress_select:
+            return
+        selection = self.slots_tree.selection()
+        if selection:
+            try:
+                self._load_slot(int(selection[0]))
+            except ValueError:
+                return
+
+    def _load_slot(self, slot: int) -> None:
+        if self.current is None:
+            return
+        self._current_slot = slot
+        self.slot_var.set(
+            tr(
+                "backpacks.slot_display",
+                index=slot + 1, size=self.current.size,
+            )
+        )
+        item = self.current.item_map().get(slot)
+        item_format = (
+            self.app.world.version_profile.item_format
+            if self.app.world is not None else "components"
+        )
+        self.extra_label_var.set(
+            tr("common.label.extra_nbt_snbt", tag=extra_key(item_format))
+        )
+        if item is None:
+            self.id_var.set("")
+            self.count_var.set("1")
+            _set_text(self.extra_editor, "", readonly=False)
+            self.delete_button.configure(state="disabled")
+            self.status_var.set(tr("backpacks.status.empty_slot"))
+            return
+        self.id_var.set(item_id(item))
+        self.count_var.set(str(item_count(item, item_format)))
+        extra = item_extra(item, item_format)
+        if extra is not None and len(extra) > 0:
+            _set_text(self.extra_editor, to_snbt_pretty(extra), readonly=False)
+        else:
+            _set_text(self.extra_editor, "", readonly=False)
+        self.delete_button.configure(state="normal")
+        self.status_var.set(
+            tr(
+                "backpacks.status.loaded_row",
+                index=slot + 1,
+                description=_describe_item(item, item_format),
+            )
+        )
+
+    def select_slot(self, slot: int) -> Optional[CompoundTag]:
+        """选中并加载背包槽位（空槽位返回 None），同时同步左侧列表选中行。"""
+        backpack = self.current
+        if backpack is None:
+            raise RuntimeError(tr("backpacks.error.no_backpack_selected"))
+        target_slot = int(slot)
+        if not 0 <= target_slot < backpack.size:
+            raise ValueError(
+                tr(
+                    "backpacks.error.slot_out_of_range",
+                    index=target_slot + 1,
+                    size=backpack.size,
+                )
+            )
+        self._load_slot(target_slot)
+        iid = str(target_slot)
+        if self.slots_tree.exists(iid):
+            self._suppress_select = True
+            try:
+                self.slots_tree.selection_set(iid)
+                self.slots_tree.see(iid)
+            finally:
+                self._suppress_select = False
+        return backpack.item_map().get(target_slot)
+
+    def _parse_extra(self) -> Optional[CompoundTag]:
+        text = _get_text(self.extra_editor).strip()
+        if not text:
+            return None
+        try:
+            tag = parse_snbt(text)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                tr("error.extra_nbt_parse", error=_exc_text(exc))
+            ) from exc
+        if not isinstance(tag, CompoundTag):
+            raise ValueError(tr("error.extra_nbt_compound"))
+        return tag
+
+    def _persist(self) -> list[str]:
+        if self.store is None:
+            raise RuntimeError(tr("backpacks.error.no_store"))
+        backups = self.store.save()
+        self.app.show_backups(backups)
+        return backups
+
+    # ---- 公开操作 -------------------------------------------------------- #
+    def save_slot(
+        self,
+        item_id_value: str,
+        count: int,
+        extra: Optional[CompoundTag] = None,
+        slot: Optional[int] = None,
+    ) -> list[str]:
+        """写入/替换背包槽位物品并保存，返回本次产生的备份路径。"""
+        world = self.require_world()
+        backpack = self.current
+        if backpack is None:
+            raise RuntimeError(tr("backpacks.error.no_backpack_selected"))
+        target_slot = self._current_slot if slot is None else int(slot)
+        if target_slot is None:
+            raise ValueError(tr("backpacks.error.no_slot"))
+        if not 0 <= target_slot < backpack.size:
+            raise ValueError(
+                tr(
+                    "backpacks.error.slot_out_of_range",
+                    index=target_slot + 1,
+                    size=backpack.size,
+                )
+            )
+        if not str(item_id_value).strip():
+            raise ValueError(tr("error.item_id_empty"))
+        item_text = str(item_id_value).strip()
+        try:
+            normalized_id = normalize_item_id(item_text)
+        except ValueError:
+            raise ValueError(
+                tr("backpacks.error.item_id_invalid", value=item_text)
+            ) from None
+        try:
+            count_value = int(str(count).strip())
+        except (TypeError, ValueError):
+            raise ValueError(tr("error.item_count_not_int")) from None
+        if not 1 <= count_value <= 99:
+            raise ValueError(
+                tr("error.item_count_range", value=count_value)
+            )
+        if extra is not None and not isinstance(extra, CompoundTag):
+            raise ValueError(tr("error.extra_nbt_compound"))
+
+        item_format = world.version_profile.item_format
+        existing = backpack.item_map().get(target_slot)
+        if existing is not None:
+            item = update_item_fields(
+                existing, normalized_id, count_value, extra, item_format
+            )
+        else:
+            item = make_item(
+                normalized_id, count_value, extra, item_format, slot=target_slot
+            )
+        if self.store is None:
+            raise RuntimeError(tr("backpacks.error.no_store"))
+        self.store.set_inventory_item(backpack, target_slot, item, item_format)
+
+        backups = self._persist()
+        backpack_uuid = backpack.uuid
+        self.reload_data(select_uuid=backpack_uuid)
+        self._reload_slots(select_slot=target_slot)
+        self.status_var.set(
+            tr(
+                "backpacks.status.saved",
+                index=target_slot + 1,
+                description=_describe_item(item, item_format),
+                backup=_backup_status_text(backups),
+            )
+        )
+        self.app.set_status(tr("status.backpacks_saved", uuid=backpack_uuid))
+        return backups
+
+    def delete_slot(self, slot: Optional[int] = None) -> list[str]:
+        """删除背包槽位物品并保存，返回本次产生的备份路径。"""
+        world = self.require_world()
+        backpack = self.current
+        if backpack is None:
+            raise RuntimeError(tr("backpacks.error.no_backpack_selected"))
+        target_slot = self._current_slot if slot is None else int(slot)
+        if target_slot is None:
+            raise ValueError(tr("backpacks.error.no_slot"))
+        if backpack.item_map().get(target_slot) is None:
+            raise ValueError(tr("backpacks.error.no_item_to_delete"))
+        if self.store is None:
+            raise RuntimeError(tr("backpacks.error.no_store"))
+        removed = self.store.delete_inventory_item(backpack, target_slot)
+        if not removed:
+            raise ValueError(tr("backpacks.error.no_item_to_delete"))
+        backups = self._persist()
+        backpack_uuid = backpack.uuid
+        self.reload_data(select_uuid=backpack_uuid)
+        self._reload_slots(select_slot=target_slot)
+        self.status_var.set(
+            tr(
+                "backpacks.status.deleted",
+                index=target_slot + 1,
+                backup=_backup_status_text(backups),
+            )
+        )
+        self.app.set_status(tr("status.backpacks_deleted", uuid=backpack_uuid))
+        return backups
+
+    # ---- 按钮回调 -------------------------------------------------------- #
+    def _ui_reload(self) -> None:
+        self._run_ui(self.refresh)
+
+    def _ui_save(self) -> None:
+        try:
+            if self._current_slot is None:
+                raise ValueError(tr("backpacks.error.no_slot"))
+            try:
+                count = int(self.count_var.get().strip())
+            except ValueError:
+                raise ValueError(tr("error.item_count_not_int")) from None
+            extra = self._parse_extra()
+            self.save_slot(
+                self.id_var.get(), count, extra, self._current_slot
+            )
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            messagebox.showerror(
+                tr("dialog.error.save_backpack.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+    def _ui_delete(self) -> None:
+        if self._current_slot is None:
+            return
+        slot = self._current_slot
+        if self.current is None or self.current.item_map().get(slot) is None:
+            self.status_var.set(tr("backpacks.status.empty_no_delete"))
+            return
+        if not messagebox.askyesno(
+            tr("backpacks.confirm.delete_title"),
+            tr("backpacks.confirm.delete", index=slot + 1),
+            parent=self.winfo_toplevel(),
+        ):
+            return
+        try:
+            self.delete_slot(slot)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                tr("dialog.error.delete_backpack.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+    def _on_backpack_change(self, _event: "tk.Event | None" = None) -> None:
+        uuid = self.backpack_var.get()
+        if not uuid:
+            return
+        try:
+            self.select_backpack(uuid)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                tr("dialog.error.load_backpacks.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+
+# --------------------------------------------------------------------------- #
+# 模组数据子页：ExtendedAE-Plus Infinity Cells
+# --------------------------------------------------------------------------- #
+INFINITY_MOD_VERSION = "1.6.4.1"
+INFINITY_GAME_VERSION = "1.21.1"
+INFINITY_LOADER_VERSION = "21.1.238"
+
+
+class InfinityCellsTab(_Tab):
+    """ExtendedAE-Plus 无限存储单元（BigInteger Cell）读取/修改。
+
+    版本标注为工作区 ExtendedAE-Plus 源码的构建元数据：
+      - ExtendedAE-Plus 1.6.4.1
+      - Minecraft 1.21.1
+      - NeoForge 21.1.238
+    """
+
+    title_key = "tab.infinity_cells"
+    MOD_NAME = "ExtendedAE-Plus"
+    MOD_VERSION = INFINITY_MOD_VERSION
+    GAME_VERSION = INFINITY_GAME_VERSION
+    LOADER_VERSION = INFINITY_LOADER_VERSION
+    DATA_PATH = INFINITY_DATA_PATH
+
+    def _build(self) -> None:
+        self.store: Optional[InfinityCellStore] = None
+        self.cells: list[InfinityCell] = []
+        self.current: Optional[InfinityCell] = None
+        self._current_index: Optional[int] = None
+        self._suppress_select = False
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+
+        # ---- 版本标注 / 警告 --------------------------------------------- #
+        banner = ttk.Frame(self, padding=(8, 6, 8, 0))
+        banner.grid(row=0, column=0, sticky="ew")
+        self.mismatch_var = _build_version_banner(
+            banner,
+            prefix="infinity_cells",
+            mod_version=self.MOD_VERSION,
+            game_version=self.GAME_VERSION,
+            loader_version=self.LOADER_VERSION,
+            data_path=self.DATA_PATH,
+        )
+
+        # ---- 存储单元选择 ------------------------------------------------- #
+        bar = ttk.Frame(self, padding=(8, 6))
+        bar.grid(row=1, column=0, sticky="ew")
+        bar.columnconfigure(3, weight=1)
+        ttk.Label(bar, text=_label(tr("infinity_cells.label.cell"))).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.cell_var = tk.StringVar()
+        self.cell_combo = ttk.Combobox(
+            bar, textvariable=self.cell_var, state="readonly", width=44,
+        )
+        self.cell_combo.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self.cell_combo.bind("<<ComboboxSelected>>", self._on_cell_change)
+        ttk.Button(
+            bar, text=tr("button.reload"), command=self._ui_reload,
+        ).grid(row=0, column=2, sticky="w")
+        self.info_var = tk.StringVar(value=tr("common.no_world"))
+        ttk.Label(
+            bar, textvariable=self.info_var, style="Hint.TLabel",
+            wraplength=720, justify="left",
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        # ---- 条目列表 / 编辑表单 ----------------------------------------- #
+        body = ttk.Frame(self, padding=(8, 0, 8, 4))
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=2)
+        body.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(body, text=tr("infinity_cells.entries_box"), padding=6)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.rowconfigure(0, weight=1)
+        left.columnconfigure(0, weight=1)
+        columns = ("index", "item", "amount", "extra")
+        headings = {
+            "index": tr("infinity_cells.heading.index"),
+            "item": tr("common.heading.item_id"),
+            "amount": tr("common.heading.count"),
+            "extra": tr("infinity_cells.heading.key_extra"),
+        }
+        widths = {"index": 50, "item": 190, "amount": 170, "extra": 180}
+        self.entries_tree = ttk.Treeview(
+            left, columns=columns, show="headings", height=18, selectmode="browse",
+        )
+        self.tree = self.entries_tree  # 与其它标签页一致的别名
+        for column in columns:
+            self.entries_tree.heading(column, text=headings[column])
+            self.entries_tree.column(column, width=widths[column], anchor="w")
+        self.entries_tree.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.entries_tree.yview)
+        hscroll = ttk.Scrollbar(left, orient="horizontal", command=self.entries_tree.xview)
+        self.entries_tree.configure(
+            yscrollcommand=scroll.set, xscrollcommand=hscroll.set,
+        )
+        scroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        self.entries_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        right = ttk.LabelFrame(
+            body, text=tr("infinity_cells.editor_box"), padding=8,
+        )
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(1, weight=1)
+        right.rowconfigure(3, weight=1)
+
+        ttk.Label(right, text=tr("infinity_cells.label.current_entry")).grid(
+            row=0, column=0, sticky="w", pady=2
+        )
+        self.entry_var = tk.StringVar(value=tr("common.not_selected"))
+        ttk.Label(
+            right, textvariable=self.entry_var, style="Hint.TLabel",
+            wraplength=360, justify="left",
+        ).grid(row=0, column=1, sticky="w", pady=2)
+
+        ttk.Label(right, text=tr("infinity_cells.label.amount")).grid(
+            row=1, column=0, sticky="w", pady=2
+        )
+        self.amount_var = tk.StringVar()
+        self.amount_entry = ttk.Entry(right, textvariable=self.amount_var)
+        self.amount_entry.grid(row=1, column=1, sticky="ew", pady=2)
+
+        ttk.Label(right, text=tr("infinity_cells.label.key")).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 2)
+        )
+        self.key_view = ScrolledText(
+            right, height=6, wrap="word", undo=False, font=self.app.mono_font,
+        )
+        self.key_view.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        _set_text(self.key_view, "", readonly=True)
+        ttk.Label(
+            right, text=tr("infinity_cells.hint.key"),
+            style="Hint.TLabel", wraplength=380, justify="left",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        buttons = ttk.Frame(right)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.save_button = ttk.Button(
+            buttons, text=tr("button.save_amount"), style="Accent.TButton",
+            command=self._ui_save,
+        )
+        self.save_button.pack(side="left")
+        self.delete_button = ttk.Button(
+            buttons, text=tr("button.delete_entry"), command=self._ui_delete,
+        )
+        self.delete_button.pack(side="left", padx=(8, 0))
+        ttk.Button(
+            buttons, text=tr("button.reload"), command=self._ui_reload,
+        ).pack(side="left", padx=(8, 0))
+
+        add_box = ttk.LabelFrame(right, text=tr("infinity_cells.add_box"), padding=6)
+        add_box.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        add_box.columnconfigure(0, weight=1)
+        ttk.Label(add_box, text=tr("infinity_cells.label.add_key")).grid(
+            row=0, column=0, columnspan=3, sticky="w"
+        )
+        self.add_key_var = tk.StringVar(
+            value='{#t:"ae2:i",id:"minecraft:stone"}'
+        )
+        self.add_key_entry = ttk.Entry(add_box, textvariable=self.add_key_var)
+        self.add_key_entry.grid(
+            row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0)
+        )
+        add_row = ttk.Frame(add_box)
+        add_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Label(add_row, text=tr("infinity_cells.label.add_amount")).pack(side="left")
+        self.add_amount_var = tk.StringVar(value="1")
+        self.add_amount_entry = ttk.Entry(
+            add_row, textvariable=self.add_amount_var, width=24,
+        )
+        self.add_amount_entry.pack(side="left", padx=(4, 8))
+        self.add_button = ttk.Button(
+            add_row, text=tr("infinity_cells.button.add_entry"),
+            command=self._ui_add,
+        )
+        self.add_button.pack(side="left")
+
+        self.status_var = tk.StringVar(value=tr("common.status.select_slot_hint"))
+        ttk.Label(
+            right, textvariable=self.status_var, style="Hint.TLabel",
+            wraplength=380, justify="left",
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    # ---- 加载 / 展示 ----------------------------------------------------- #
+    def _update_mismatch(self, world: Optional[World]) -> None:
+        if world is not None and world.version_profile.id != self.GAME_VERSION:
+            self.mismatch_var.set(
+                tr(
+                    "infinity_cells.mismatch",
+                    version=world.version_profile.id,
+                    game=self.GAME_VERSION,
+                )
+            )
+        else:
+            self.mismatch_var.set("")
+
+    def _update_info(self) -> None:
+        if self.current is not None:
+            summary = self.current.summary()
+            self.info_var.set(
+                tr(
+                    "infinity_cells.info.summary",
+                    count=len(self.cells),
+                    uuid=self.current.uuid,
+                    types=summary["types"],
+                    total=str(summary["total"]),
+                )
+            )
+        elif self.cells:
+            self.info_var.set(
+                tr("infinity_cells.info.summary_short", count=len(self.cells))
+            )
+        else:
+            self.info_var.set(
+                tr("infinity_cells.info.no_data", path=self.DATA_PATH)
+            )
+
+    def _clear_table(self) -> None:
+        self._suppress_select = True
+        try:
+            self.entries_tree.delete(*self.entries_tree.get_children())
+        finally:
+            self._suppress_select = False
+
+    def _clear_editor(self) -> None:
+        self._current_index = None
+        self.entry_var.set(tr("common.not_selected"))
+        self.amount_var.set("")
+        _set_text(self.key_view, "", readonly=True)
+        try:
+            self.delete_button.configure(state="disabled")
+        except tk.TclError:
+            pass
+
+    def load_store(self) -> InfinityCellStore:
+        """后台线程入口：只读 data/*.dat，不触碰 Tk。"""
+        return list_cells(self.require_world())
+
+    def apply_store(
+        self, store: InfinityCellStore, select_uuid: Optional[str] = None,
+    ) -> list[InfinityCell]:
+        """主线程入口：把已读取的 store 应用到界面。"""
+        self.store = store
+        self.cells = list(store.cells)
+        values = [cell.uuid for cell in self.cells]
+        active = select_uuid or self.cell_var.get()
+        if active not in values:
+            active = values[0] if values else ""
+        self.cell_combo.configure(values=values)
+        self.cell_var.set(active)
+        if active:
+            self.select_cell(active)
+        else:
+            self.current = None
+            self._clear_table()
+            self._clear_editor()
+            self._update_info()
+        return self.cells
+
+    def reload_data(self, select_uuid: Optional[str] = None) -> list[InfinityCell]:
+        """同步重新读取并刷新（脚本/按钮使用）；打开世界时由 ModDataTab 异步调用。"""
+        return self.apply_store(self.load_store(), select_uuid)
+
+    def refresh(self) -> None:
+        world = self.app.world
+        self._update_mismatch(world)
+        if world is None:
+            self.store = None
+            self.cells = []
+            self.current = None
+            self.cell_combo.configure(values=[])
+            self.cell_var.set("")
+            self.info_var.set(tr("common.no_world"))
+            self._clear_table()
+            self._clear_editor()
+            self.status_var.set(tr("status.no_world"))
+            return
+        try:
+            self.reload_data()
+            self.status_var.set(
+                tr("infinity_cells.status.loaded", uuid=self.cell_var.get() or "—")
+            )
+        except Exception as exc:  # noqa: BLE001 - 刷新失败不应让整个页面崩溃
+            self.store = None
+            self.cells = []
+            self.current = None
+            self.cell_combo.configure(values=[])
+            self.cell_var.set("")
+            self._clear_table()
+            self._clear_editor()
+            message = tr("infinity_cells.info.load_failed", error=_exc_text(exc))
+            self.info_var.set(message)
+            self.status_var.set(message)
+
+    def refresh_cells(self) -> None:
+        """刷新无限存储数据（refresh 的别名，便于脚本调用）。"""
+        self.refresh()
+
+    def select_cell(self, uuid: str) -> InfinityCell:
+        """选中一个存储单元并刷新条目列表。"""
+        world = self.require_world()
+        store = self.store if self.store is not None else list_cells(world)
+        cell = store.get(str(uuid))
+        if cell is None:
+            raise ValueError(tr("infinity_cells.error.no_cell", uuid=uuid))
+        self.store = store
+        self.current = cell
+        self.cell_var.set(cell.uuid)
+        self._update_info()
+        self._reload_entries()
+        self.status_var.set(tr("infinity_cells.status.loaded", uuid=cell.uuid))
+        return cell
+
+    # ---- 条目表格 / 编辑器 ----------------------------------------------- #
+    def _reload_entries(self, select_index: Optional[int] = None) -> None:
+        self._suppress_select = True
+        target: Optional[int] = None
+        try:
+            self.entries_tree.delete(*self.entries_tree.get_children())
+            if self.current is None:
+                self._clear_editor()
+                return
+            for entry in self.current.entries():
+                iid = str(entry.index)
+                amount_text = (
+                    str(entry.amount) if entry.amount is not None else "—"
+                )
+                values = (
+                    str(entry.index + 1),
+                    entry.item_id,
+                    amount_text,
+                    key_description(entry.key_tag, max_length=90),
+                )
+                self.entries_tree.insert("", "end", iid=iid, values=values)
+            if select_index is not None and self.entries_tree.exists(
+                str(select_index)
+            ):
+                target = select_index
+            elif self._current_index is not None and self.entries_tree.exists(
+                str(self._current_index)
+            ):
+                target = self._current_index
+            elif self.entries_tree.get_children():
+                target = int(self.entries_tree.get_children()[0])
+            if target is not None:
+                self.entries_tree.selection_set(str(target))
+                self.entries_tree.see(str(target))
+        finally:
+            self._suppress_select = False
+        if target is not None:
+            self._load_entry(target)
+        else:
+            self._clear_editor()
+
+    def _on_tree_select(self, _event: "tk.Event | None" = None) -> None:
+        if self._suppress_select:
+            return
+        selection = self.entries_tree.selection()
+        if not selection:
+            return
+        try:
+            index = int(selection[0])
+        except ValueError:
+            return
+        # selection_set() 会再次触发 <<TreeviewSelect>>；如果选中的已经是当前
+        # 条目就直接返回，避免 select_entry -> selection_set -> 事件 -> ... 递归。
+        if self._current_index == index:
+            return
+        self._load_entry(index)
+
+    def _find_entry(self, index: int) -> Optional[CellEntry]:
+        if self.current is None:
+            return None
+        try:
+            wanted = int(index)
+        except (TypeError, ValueError):
+            return None
+        for entry in self.current.entries():
+            if entry.index == wanted:
+                return entry
+        return None
+
+    def select_entry(self, index: int) -> Optional[CellEntry]:
+        """选中并加载指定条目（不存在时返回 None），同时同步左侧列表选中行。"""
+        entry = self._find_entry(index)
+        if entry is None:
+            self._clear_editor()
+            return None
+        self._current_index = entry.index
+        self.entry_var.set(
+            tr(
+                "infinity_cells.entry_display",
+                index=entry.index + 1,
+                id=entry.item_id,
+            )
+        )
+        self.amount_var.set("" if entry.amount is None else str(entry.amount))
+        _set_text(self.key_view, to_snbt_pretty(entry.key_tag), readonly=True)
+        try:
+            self.delete_button.configure(state="normal")
+        except tk.TclError:
+            pass
+        amount_text = str(entry.amount) if entry.amount is not None else "—"
+        self.status_var.set(
+            tr(
+                "infinity_cells.status.loaded_row",
+                index=entry.index + 1,
+                id=entry.item_id,
+                amount=amount_text,
+            )
+        )
+        iid = str(entry.index)
+        if self.entries_tree.exists(iid) and self.entries_tree.selection() != (iid,):
+            self._suppress_select = True
+            try:
+                self.entries_tree.selection_set(iid)
+                self.entries_tree.see(iid)
+            finally:
+                self._suppress_select = False
+        return entry
+
+    def _load_entry(self, index: int) -> None:
+        self.select_entry(index)
+
+    def _persist(self) -> list[str]:
+        if self.store is None:
+            raise RuntimeError(tr("infinity_cells.error.no_store"))
+        backups = self.store.save()
+        self.app.show_backups(backups)
+        return backups
+
+    # ---- 公开操作 -------------------------------------------------------- #
+    def set_amount(self, amount_text: Any, index: Optional[int] = None) -> list[str]:
+        """修改某个条目的十进制大整数数量并保存，返回备份路径列表。"""
+        self.require_world()
+        cell = self.current
+        if cell is None:
+            raise RuntimeError(tr("infinity_cells.error.no_cell_selected"))
+        target_index = self._current_index if index is None else int(index)
+        if target_index is None:
+            raise ValueError(tr("infinity_cells.error.no_entry"))
+        entry = self._find_entry(target_index)
+        if entry is None:
+            raise ValueError(tr("infinity_cells.error.no_entry"))
+        amount = _parse_positive_big_integer(amount_text)
+        if self.store is None:
+            raise RuntimeError(tr("infinity_cells.error.no_store"))
+        self.store.set_amount(cell, target_index, amount)
+        backups = self._persist()
+        cell_uuid = cell.uuid
+        self.reload_data(select_uuid=cell_uuid)
+        self._reload_entries(select_index=target_index)
+        self.status_var.set(
+            tr(
+                "infinity_cells.status.saved",
+                index=target_index + 1,
+                amount=str(amount),
+                backup=_backup_status_text(backups),
+            )
+        )
+        self.app.set_status(tr("status.infinity_cells_saved", uuid=cell_uuid))
+        return backups
+
+    def delete_entry(self, index: Optional[int] = None) -> list[str]:
+        """删除某个条目并保存，返回备份路径列表。"""
+        self.require_world()
+        cell = self.current
+        if cell is None:
+            raise RuntimeError(tr("infinity_cells.error.no_cell_selected"))
+        target_index = self._current_index if index is None else int(index)
+        if target_index is None:
+            raise ValueError(tr("infinity_cells.error.no_entry"))
+        if self.store is None:
+            raise RuntimeError(tr("infinity_cells.error.no_store"))
+        if not self.store.delete_entry(cell, target_index):
+            raise ValueError(tr("infinity_cells.error.no_entry"))
+        backups = self._persist()
+        cell_uuid = cell.uuid
+        self.reload_data(select_uuid=cell_uuid)
+        self._reload_entries(select_index=target_index)
+        self.status_var.set(
+            tr(
+                "infinity_cells.status.deleted",
+                index=target_index + 1,
+                backup=_backup_status_text(backups),
+            )
+        )
+        self.app.set_status(tr("status.infinity_cells_saved", uuid=cell_uuid))
+        return backups
+
+    def add_entry(self, key_snbt: str, amount_text: Any) -> list[str]:
+        """新增一个 AEKey → BigInteger 条目并保存，返回备份路径列表。"""
+        self.require_world()
+        cell = self.current
+        if cell is None:
+            raise RuntimeError(tr("infinity_cells.error.no_cell_selected"))
+        text = str(key_snbt or "").strip()
+        if not text:
+            raise ValueError(tr("infinity_cells.error.key_snbt_parse", error="—"))
+        try:
+            key_tag = parse_snbt(text)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                tr("infinity_cells.error.key_snbt_parse", error=_exc_text(exc))
+            ) from exc
+        if not isinstance(key_tag, CompoundTag):
+            raise ValueError(tr("infinity_cells.error.key_snbt_compound"))
+        amount = _parse_positive_big_integer(amount_text)
+        if self.store is None:
+            raise RuntimeError(tr("infinity_cells.error.no_store"))
+        self.store.add_entry(cell, key_tag, amount)
+        cell_uuid = cell.uuid
+        backups = self._persist()
+        self.reload_data(select_uuid=cell_uuid)
+        entries = self.current.entries() if self.current is not None else []
+        new_index = entries[-1].index if entries else 0
+        self._reload_entries(select_index=new_index)
+        self.status_var.set(
+            tr(
+                "infinity_cells.status.added",
+                index=new_index + 1,
+                id=key_id(key_tag),
+                amount=str(amount),
+                backup=_backup_status_text(backups),
+            )
+        )
+        self.app.set_status(tr("status.infinity_cells_saved", uuid=cell_uuid))
+        return backups
+
+    # ---- 按钮回调 -------------------------------------------------------- #
+    def _ui_reload(self) -> None:
+        self._run_ui(self.refresh)
+
+    def _ui_save(self) -> None:
+        try:
+            if self._current_index is None:
+                raise ValueError(tr("infinity_cells.error.no_entry"))
+            self.set_amount(self.amount_var.get(), self._current_index)
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            messagebox.showerror(
+                tr("dialog.error.save_infinity.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+    def _ui_delete(self) -> None:
+        if self._current_index is None:
+            return
+        index = self._current_index
+        if not messagebox.askyesno(
+            tr("infinity_cells.confirm.delete_title"),
+            tr("infinity_cells.confirm.delete", index=index + 1),
+            parent=self.winfo_toplevel(),
+        ):
+            return
+        try:
+            self.delete_entry(index)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                tr("dialog.error.delete_infinity.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+    def _ui_add(self) -> None:
+        try:
+            self.add_entry(self.add_key_var.get(), self.add_amount_var.get())
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                tr("dialog.error.add_infinity.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+    def _on_cell_change(self, _event: "tk.Event | None" = None) -> None:
+        uuid = self.cell_var.get()
+        if not uuid:
+            return
+        try:
+            self.select_cell(uuid)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                tr("dialog.error.load_infinity.title"), _exc_text(exc),
+                parent=self.winfo_toplevel(),
+            )
+
+
+# --------------------------------------------------------------------------- #
 # Tab 4: 原始 NBT
 # --------------------------------------------------------------------------- #
 class NbtTab(_Tab):
@@ -3241,8 +4668,15 @@ class NbtTab(_Tab):
 
     def _build(self) -> None:
         self.file_presets: list[str] = []
+        self._undo_stack: list[dict[str, Any]] = []
+        self._last_output_text = ""
+        self._suppress_output_tracking = False
+        self._view_target: Optional[str] = None
+        self._view_path = ""
+        self._view_world_path: Optional[str] = None
+        self._format_help_tip: Optional[tk.Toplevel] = None
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(4, weight=1)
 
         file_frame = ttk.Frame(self)
         file_frame.grid(row=0, column=0, sticky="ew")
@@ -3291,14 +4725,44 @@ class NbtTab(_Tab):
             path_frame, text=tr("nbt.hint.path"), style="Hint.TLabel",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
+        format_bar = ttk.Frame(self)
+        format_bar.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        self.format_button = ttk.Button(
+            format_bar, text=tr("button.format_snbt"),
+            command=self._ui_format_snbt,
+        )
+        self.format_button.pack(side="left")
+        self.unformat_button = ttk.Button(
+            format_bar, text=tr("button.unformat_snbt"),
+            command=self._ui_unformat_snbt,
+        )
+        self.unformat_button.pack(side="left", padx=(8, 0))
+        self.undo_button = ttk.Button(
+            format_bar, text=tr("button.undo_nbt"),
+            command=self._ui_undo_nbt,
+        )
+        self.undo_button.pack(side="left", padx=(8, 0))
+        self.help_icon = tk.Label(
+            format_bar, text="?", width=2, cursor="question_arrow",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            foreground="#0055aa", background="#eef4ff",
+            relief="ridge", borderwidth=1, padx=3, pady=0,
+        )
+        self.help_icon.pack(side="left", padx=(12, 0))
+        self.help_icon.bind("<Enter>", self._show_format_help)
+        self.help_icon.bind("<Leave>", self._hide_format_help)
+
         self.output = ScrolledText(
             self, height=14, wrap="word", undo=False, font=self.app.mono_font,
         )
-        self.output.grid(row=3, column=0, sticky="nsew")
-        _set_text(self.output, tr("nbt.output_initial"))
+        self.output.grid(row=4, column=0, sticky="nsew")
+        _set_text(self.output, tr("nbt.output_initial"), readonly=False)
+        self._last_output_text = _get_text(self.output)
+        self.output.bind("<<Modified>>", self._on_output_modified)
+        self.output.edit_modified(False)
 
         write_box = ttk.LabelFrame(self, text=tr("nbt.write_box"), padding=8)
-        write_box.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        write_box.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         write_box.columnconfigure(3, weight=1)
         ttk.Label(write_box, text=_label(tr("nbt.label.type"))).grid(
             row=0, column=0, sticky="w"
@@ -3320,10 +4784,10 @@ class NbtTab(_Tab):
             write_box, text=tr("nbt.create_nodes"), variable=self.create_var,
         )
         self.create_check.grid(row=0, column=4, padx=(8, 0))
-        self.write_button = ttk.Button(
-            write_box, text=tr("button.write"), command=self._ui_write,
+        self.write_view_button = ttk.Button(
+            write_box, text=tr("button.write_view"), command=self._ui_write_view,
         )
-        self.write_button.grid(row=0, column=5, padx=(8, 0))
+        self.write_view_button.grid(row=0, column=5, padx=(8, 0))
         ttk.Label(
             write_box,
             text=tr("nbt.hint.write_effect"),
@@ -3364,6 +4828,52 @@ class NbtTab(_Tab):
     def _ui_read(self) -> None:
         self._run_ui(self.read)
 
+    def _show_format_help(self, _event: "tk.Event | None" = None) -> None:
+        """鼠标悬停在“?”上时，在独立 Toplevel 中显示说明。"""
+        if self._format_help_tip is not None:
+            return
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        label = tk.Label(
+            tip,
+            text=tr("nbt.hint.format"),
+            justify="left",
+            anchor="w",
+            wraplength=560,
+            background="#fffbe6",
+            foreground="#222222",
+            relief="solid",
+            borderwidth=1,
+            padx=8,
+            pady=6,
+            font=("Microsoft YaHei UI", 9),
+        )
+        label.pack()
+        tip.update_idletasks()
+        x = self.help_icon.winfo_rootx()
+        y = self.help_icon.winfo_rooty() + self.help_icon.winfo_height() + 6
+        width = tip.winfo_reqwidth()
+        height = tip.winfo_reqheight()
+        screen_w = tip.winfo_screenwidth()
+        screen_h = tip.winfo_screenheight()
+        x = max(4, min(x, screen_w - width - 4))
+        y = max(4, min(y, screen_h - height - 4))
+        tip.geometry(f"+{x}+{y}")
+        self._format_help_tip = tip
+
+    def _hide_format_help(self, _event: "tk.Event | None" = None) -> None:
+        tip = self._format_help_tip
+        self._format_help_tip = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
     def _ui_write(self) -> None:
         self._run_ui(
             lambda: self.write(
@@ -3372,6 +4882,141 @@ class NbtTab(_Tab):
                 bool(self.create_var.get()),
             )
         )
+
+    def _ui_format_snbt(self) -> None:
+        try:
+            self.format_snbt()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.format_snbt.title"), exc)
+
+    def _ui_unformat_snbt(self) -> None:
+        try:
+            self.unformat_snbt()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.unformat_snbt.title"), exc)
+
+    def _on_output_modified(self, _event: "tk.Event | None" = None) -> None:
+        """记录直接键入造成的修改；程序化替换用 _set_output_text 处理。"""
+        if self._suppress_output_tracking:
+            return
+        try:
+            current = _get_text(self.output)
+        except tk.TclError:
+            return
+        if current != self._last_output_text:
+            self._push_undo({"text": self._last_output_text, "file": None})
+            self._last_output_text = current
+        try:
+            self.output.edit_modified(False)
+        except tk.TclError:
+            pass
+
+    def _push_undo(self, action: dict[str, Any]) -> None:
+        self._undo_stack.append(action)
+        if len(self._undo_stack) > 100:
+            del self._undo_stack[:-100]
+
+    def _set_output_text(
+        self,
+        text: str,
+        *,
+        record: bool = True,
+        action_file: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """更新可编辑输出区；需要时把上一版文本/文件状态记入撤回栈。"""
+        old = _get_text(self.output)
+        if record and (old != text or action_file is not None):
+            self._push_undo({"text": old, "file": action_file})
+        self._suppress_output_tracking = True
+        try:
+            _set_text(self.output, text, readonly=False)
+            self._last_output_text = text
+            self.output.edit_modified(False)
+        finally:
+            self._suppress_output_tracking = False
+
+    def _ui_undo_nbt(self) -> None:
+        try:
+            self.undo_nbt()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.undo_nbt.title"), exc)
+
+    def _ui_write_view(self) -> None:
+        try:
+            self.write_current_view()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.write_view.title"), exc)
+
+    def write_current_view(self) -> None:
+        """执行与“写入”完全相同的按路径写值操作，但保持并刷新当前视图。"""
+        self.write(
+            self.value_var.get(),
+            self.value_type_var.get(),
+            bool(self.create_var.get()),
+            keep_view=True,
+        )
+
+    def _restore_nbt_file(self, info: dict[str, Any]) -> None:
+        world = self.require_world()
+        target = str(info["target"])
+        old_tag = info["tag"]
+        before = len(world.backups)
+        world.write_dat(target, old_tag)
+        new_backups = list(world.backups[before:])
+        resolved = world.resolve_world_file(target)
+        if os.path.normcase(resolved) == os.path.normcase(os.path.abspath(world.level_path)):
+            self.app.reload_level()
+        else:
+            player_dir = os.path.normcase(os.path.abspath(world.player_dir)) + os.sep
+            if os.path.normcase(resolved).startswith(player_dir):
+                try:
+                    self.app.player_tab.refresh_players()
+                except Exception:  # noqa: BLE001
+                    pass
+        self.app.show_backups(new_backups)
+
+    def undo_nbt(self) -> None:
+        """撤回最近一次显示编辑；若该步是写入栏写入，也恢复写入前的文件。"""
+        if not self._undo_stack:
+            raise ValueError(tr("nbt.undo.none"))
+        action = self._undo_stack.pop()
+        file_info = action.get("file")
+        if file_info is not None:
+            try:
+                self._restore_nbt_file(file_info)
+            except Exception:
+                self._undo_stack.append(action)
+                raise
+        self._set_output_text(str(action.get("text", "")), record=False)
+        self.app.set_status(
+            tr("status.nbt_undone_file") if file_info is not None
+            else tr("status.nbt_undone")
+        )
+
+    def _read_output_value(self) -> Any:
+        text = _get_text(self.output)
+        if not text:
+            raise ValueError(tr("nbt.error.output_empty"))
+        try:
+            return parse_snbt(text)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(tr("nbt.error.snbt_parse", error=_exc_text(exc))) from exc
+
+    def format_snbt(self) -> str:
+        """格式化输出区当前 SNBT（只改显示，不写存档）。"""
+        value = self._read_output_value()
+        pretty = to_snbt_pretty(value)
+        self._set_output_text(pretty)
+        self.app.set_status(tr("status.nbt_formatted"))
+        return pretty
+
+    def unformat_snbt(self) -> str:
+        """把输出区的格式化 SNBT 还原为紧凑单行 SNBT（只改显示）。"""
+        value = self._read_output_value()
+        compact = to_snbt(value)
+        self._set_output_text(compact)
+        self.app.set_status(tr("status.nbt_unformatted"))
+        return compact
 
     def _file_target(self, file: Optional[str]) -> str:
         target = str(file if file is not None else self.file_var.get()).strip()
@@ -3382,6 +5027,14 @@ class NbtTab(_Tab):
     # ---- 公开方法 -------------------------------------------------------- #
     def refresh(self) -> None:
         world = self.app.world
+        if world is None:
+            self._view_target = None
+            self._view_path = ""
+            self._view_world_path = None
+        elif self._view_world_path is not None and self._view_world_path != world.path:
+            self._view_target = None
+            self._view_path = ""
+            self._view_world_path = None
         presets: list[str] = []
         if world is not None:
             if os.path.isfile(os.path.join(world.path, "level.dat")):
@@ -3400,7 +5053,8 @@ class NbtTab(_Tab):
             self.preset_var.set("")
             if world is None:
                 self.file_var.set("")
-                _set_text(self.output, tr("common.no_world"))
+                self._undo_stack.clear()
+                self._set_output_text(tr("common.no_world"), record=False)
 
     def read(
         self,
@@ -3426,7 +5080,11 @@ class NbtTab(_Tab):
         else:
             value = tag
         text = to_snbt(value)
-        _set_text(self.output, text)
+        self._undo_stack.clear()
+        self._view_target = target
+        self._view_path = nbt_path
+        self._view_world_path = world.path
+        self._set_output_text(text, record=False)
         suffix = (
             tr("nbt.path_suffix", path=nbt_path) if nbt_path else tr("nbt.root_suffix")
         )
@@ -3440,9 +5098,17 @@ class NbtTab(_Tab):
         create: bool = False,
         file: Optional[str] = None,
         path: Optional[str] = None,
+        keep_view: bool = False,
     ) -> None:
-        """把 SNBT 值写入指定文件的 NBT 路径并立即落盘。"""
+        """把 SNBT 值写入指定文件的 NBT 路径并立即落盘。
+
+        ``keep_view=True`` 时，写入后不把显示区切换到写入路径的值，而是
+        保持当前读取的视图，并重新读取该视图以显示更新后的内容。
+        """
         world = self.require_world()
+        view_target = self._view_target
+        view_path = self._view_path
+        view_world_path = self._view_world_path
         target = self._file_target(file)
         nbt_path = str(path if path is not None else self.path_var.get()).strip()
         if not nbt_path:
@@ -3461,6 +5127,7 @@ class NbtTab(_Tab):
             )
 
         _name, tag = world.read_dat(target)
+        old_tag = copy.deepcopy(tag)
         if value_type == "auto":
             try:
                 existing = nbt_get_path(tag, nbt_path)
@@ -3503,12 +5170,37 @@ class NbtTab(_Tab):
                     pass
 
         written = to_snbt(value)
-        _set_text(self.output, written)
+        display_text = written
+        if keep_view and view_target is not None and view_world_path == world.path:
+            try:
+                _view_name, view_tag = world.read_dat(view_target)
+                view_value = (
+                    nbt_get_path(view_tag, view_path) if view_path else view_tag
+                )
+                display_text = to_snbt(view_value)
+                # 保持当前视图上下文不变
+            except Exception:  # noqa: BLE001 - 视图刷新失败则退回写入值
+                self._view_target = target
+                self._view_path = nbt_path
+                self._view_world_path = world.path
+        else:
+            self._view_target = target
+            self._view_path = nbt_path
+            self._view_world_path = world.path
+        self._set_output_text(
+            display_text,
+            action_file={"target": target, "tag": old_tag},
+        )
         suffix = tr("nbt.path_suffix", path=nbt_path) if nbt_path else ""
         self.app.show_backups(new_backups)
-        self.app.set_status(
-            tr("status.nbt_written", target=target, suffix=suffix, value=written)
-        )
+        if keep_view:
+            self.app.set_status(
+                tr("status.nbt_view_written", target=target, suffix=suffix)
+            )
+        else:
+            self.app.set_status(
+                tr("status.nbt_written", target=target, suffix=suffix, value=written)
+            )
 
 
 # --------------------------------------------------------------------------- #

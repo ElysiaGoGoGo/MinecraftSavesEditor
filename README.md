@@ -31,16 +31,8 @@ An offline desktop GUI editor for Minecraft Java Edition saves: world data, bloc
 
 ## 环境要求
 
-- **Python 3.10+**（开发与验证使用 Python 3.12）
-- **Tkinter**：Windows 官方 Python 安装包默认包含；Linux 可能需要安装 `python3-tk`
-- **无第三方 Python 依赖**（纯标准库）
-
-检查环境：
-
-```powershell
-python --version
-python -c "import tkinter; print('tkinter OK')"
-```
+- **Python 3.10+**
+- **Tkinter**
 
 ## 快速开始
 
@@ -108,7 +100,6 @@ MinecraftSavesEditor/
 ## 已知限制
 
 - 不支持 LZ4 压缩区块（会提示改回 deflate）；
-- 不生成新区块，只修改已存在的区块；
 - 实体/POI/结构/进度/统计暂未封装高层编辑；
 - 方块编辑不会同步 POI；
 - 仅用于本地单人存档或离线服务端备份，请勿用于在线服务器或他人存档。
