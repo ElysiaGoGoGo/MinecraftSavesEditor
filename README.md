@@ -48,17 +48,6 @@ python -m mc-save-editor
 python -m mc-save-editor --world "D:\saves\MyWorld"
 ```
 
-> **注意**：仓库内的 Python 包目录名为 `mc-save-editor/`（带连字符），因此使用
-> `python -m mc-save-editor` 启动。请从**仓库根目录**运行，不要先执行
-> `cd mc-save-editor`；普通 `import mc-save-editor` 不是合法 Python 语法，如需在代码中
-> 导入该包，建议后续改为合法包名（如 `mc_save_editor`）。
-
-自检（不打开世界，启动后自动关闭）：
-
-```powershell
-python -m mc-save-editor --self-test --self-test-ms 800
-```
-
 ## 版本支持
 
 | 版本 | DataVersion | 状态 |
@@ -79,23 +68,6 @@ python -m mc-save-editor --self-test --self-test-ms 800
 - Curios 加载时会校验槽位物品，放入不匹配的物品可能被游戏丢弃；修改前务必备份。
 
 > **版本偏差警告：Curios / Minecraft / NeoForge 任一版本不一致都可能导致未定义行为。**
-
-## 仓库结构
-
-```text
-MinecraftSavesEditor/
-├─ .gitignore
-├─ README.md
-└─ mc-save-editor/          # Python 包（仅标准库）
-   ├─ __init__.py
-   ├─ __main__.py           # python -m mc-save-editor 入口
-   ├─ nbt.py / region.py / palette.py / chunk.py
-   ├─ level.py / player.py / items.py / curios.py
-   ├─ search.py / versions.py / lock.py / world.py
-   └─ gui.py                # Tkinter GUI（八标签页）
-```
-
-当前仓库只包含运行所需的 Python 源码；开发期的测试、打包脚本、第三方参考源码与测试世界不纳入版本库。
 
 ## 已知限制
 
