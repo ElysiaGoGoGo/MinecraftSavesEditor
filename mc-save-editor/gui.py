@@ -4742,6 +4742,11 @@ class NbtTab(_Tab):
             command=self._ui_undo_nbt,
         )
         self.undo_button.pack(side="left", padx=(8, 0))
+        self.apply_display_button = ttk.Button(
+            format_bar, text=tr("button.apply_display"),
+            command=self._ui_apply_display,
+        )
+        self.apply_display_button.pack(side="left", padx=(8, 0))
         self.help_icon = tk.Label(
             format_bar, text="?", width=2, cursor="question_arrow",
             font=("Microsoft YaHei UI", 10, "bold"),
@@ -4946,6 +4951,72 @@ class NbtTab(_Tab):
             self.write_current_view()
         except Exception as exc:  # noqa: BLE001 - UI 边界
             self.app.show_error(tr("dialog.error.write_view.title"), exc)
+
+    def _ui_apply_display(self) -> None:
+        try:
+            self.apply_display()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.apply_display.title"), exc)
+
+    def apply_display(self) -> None:
+        """把显示区当前 SNBT 写回上次读取的节点，并保持该视图。"""
+        world = self.require_world()
+        if (
+            self._view_target is None
+            or self._view_world_path is None
+            or self._view_world_path != world.path
+        ):
+            raise ValueError(tr("nbt.error.no_view"))
+        target = self._view_target
+        nbt_path = self._view_path
+        text = _get_text(self.output)
+        if not text:
+            raise ValueError(tr("nbt.error.output_empty"))
+        try:
+            value = parse_snbt(text)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(tr("nbt.error.snbt_parse", error=_exc_text(exc))) from exc
+        _name, tag = world.read_dat(target)
+        old_tag = copy.deepcopy(tag)
+        if nbt_path:
+            try:
+                nbt_set_path(tag, nbt_path, value, create=False)
+            except (KeyError, IndexError, NbtError) as exc:
+                raise NbtError(
+                    tr(
+                        "nbt.error.write_path",
+                        path=repr(nbt_path),
+                        error=_exc_text(exc),
+                    )
+                ) from exc
+            new_tag = tag
+        else:
+            if not isinstance(value, CompoundTag):
+                raise ValueError(tr("nbt.error.view_root_not_compound"))
+            new_tag = value
+        before = len(world.backups)
+        world.write_dat(target, new_tag)
+        new_backups = list(world.backups[before:])
+        resolved = world.resolve_world_file(target)
+        if os.path.normcase(resolved) == os.path.normcase(os.path.abspath(world.level_path)):
+            self.app.reload_level()
+        else:
+            player_dir = os.path.normcase(os.path.abspath(world.player_dir)) + os.sep
+            if os.path.normcase(resolved).startswith(player_dir):
+                try:
+                    self.app.player_tab.refresh_players()
+                except Exception:  # noqa: BLE001
+                    pass
+        display = _get_text(self.output)
+        self._push_undo(
+            {"text": display, "file": {"target": target, "tag": old_tag}}
+        )
+        self._last_output_text = display
+        self.app.show_backups(new_backups)
+        suffix = tr("nbt.path_suffix", path=nbt_path) if nbt_path else tr("nbt.root_suffix")
+        self.app.set_status(
+            tr("status.display_applied", target=target, suffix=suffix)
+        )
 
     def write_current_view(self) -> None:
         """执行与“写入”完全相同的按路径写值操作，但保持并刷新当前视图。"""
