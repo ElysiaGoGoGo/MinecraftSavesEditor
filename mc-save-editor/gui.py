@@ -52,6 +52,7 @@ from .backpacks import (
     BACKPACK_DATA_PATH,
     Backpack,
     BackpackStore,
+    insert_recovery_item as insert_backpack_recovery,
     list_backpacks,
 )
 from .infinity_cells import (
@@ -59,6 +60,7 @@ from .infinity_cells import (
     CellEntry,
     InfinityCell,
     InfinityCellStore,
+    insert_recovery_item as insert_cell_recovery,
     key_description,
     key_id,
     list_cells,
@@ -3526,6 +3528,19 @@ class BackpacksTab(_Tab):
             wraplength=720, justify="left",
         ).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
+        ttk.Label(bar, text=_label(tr("backpacks.label.player"))).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.recover_player_var = tk.StringVar()
+        self.recover_player_combo = ttk.Combobox(
+            bar, textvariable=self.recover_player_var, state="readonly", width=42,
+        )
+        self.recover_player_combo.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        self.recover_button = ttk.Button(
+            bar, text=tr("backpacks.button.recover"), command=self._ui_recover,
+        )
+        self.recover_button.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
+
         # ---- 槽位列表 / 编辑表单 ----------------------------------------- #
         body = ttk.Frame(self, padding=(8, 0, 8, 4))
         body.grid(row=2, column=0, sticky="nsew")
@@ -3684,6 +3699,7 @@ class BackpacksTab(_Tab):
     ) -> list[Backpack]:
         """主线程入口：把已读取的 store 应用到界面。"""
         self.store = store
+        self._refresh_player_choices()
         self.backpacks = list(store.backpacks)
         values = [backpack.uuid for backpack in self.backpacks]
         active = select_uuid or self.backpack_var.get()
@@ -3707,6 +3723,7 @@ class BackpacksTab(_Tab):
     def refresh(self) -> None:
         world = self.app.world
         self._update_mismatch(world)
+        self._refresh_player_choices()
         if world is None:
             self.store = None
             self.backpacks = []
@@ -3739,6 +3756,59 @@ class BackpacksTab(_Tab):
     def refresh_backpacks(self) -> None:
         """刷新背包数据（refresh 的别名，便于脚本调用）。"""
         self.refresh()
+
+    def _refresh_player_choices(self) -> None:
+        """刷新目标玩家下拉框（playerdata 中的可读玩家）。"""
+        world = self.app.world
+        values: list[str] = []
+        if world is not None:
+            for player in world.list_players():
+                if (
+                    isinstance(getattr(player, "tag", None), CompoundTag)
+                    and not getattr(player, "_load_error", None)
+                ):
+                    values.append(player.uuid)
+        active = self.recover_player_var.get() if hasattr(self, "recover_player_var") else ""
+        if active not in values:
+            active = values[0] if values else ""
+        self.recover_player_combo.configure(values=values)
+        self.recover_player_var.set(active)
+
+    def _ui_recover(self) -> None:
+        try:
+            self.recover_to_player()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.recover_backpack.title"), exc)
+
+    def recover_to_player(self) -> int:
+        """把选中的背包 UUID 以引用 ItemStack 插入目标玩家物品栏。"""
+        world = self.require_world()
+        backpack = self.current
+        if backpack is None:
+            raise RuntimeError(tr("backpacks.error.no_backpack_selected"))
+        player_uuid = self.recover_player_var.get().strip()
+        if not player_uuid:
+            raise ValueError(tr("backpacks.error.no_player"))
+        if world.version_profile.item_format != "components":
+            raise ValueError(tr("backpacks.error.item_format"))
+        player = world.get_player(player_uuid)
+        if not any(player.get_inventory_item(s) is None for s in range(36)):
+            raise ValueError(tr("backpacks.error.inventory_full"))
+        before = len(world.backups)
+        slot = insert_backpack_recovery(
+            world, player, backpack, world.version_profile.item_format,
+        )
+        backups = list(world.backups[before:])
+        try:
+            self.app.player_tab.refresh_players()
+            self.app.player_tab.select_player(player_uuid)
+        except Exception:  # noqa: BLE001
+            pass
+        self.app.show_backups(backups)
+        status = tr("backpacks.status.recovered", uuid=player_uuid, slot=slot + 1)
+        self.status_var.set(status)
+        self.app.set_status(status)
+        return slot
 
     def select_backpack(self, uuid: str) -> Backpack:
         """选中一个背包并刷新槽位列表。"""
@@ -4137,6 +4207,19 @@ class InfinityCellsTab(_Tab):
             wraplength=720, justify="left",
         ).grid(row=0, column=3, sticky="w", padx=(8, 0))
 
+        ttk.Label(bar, text=_label(tr("infinity_cells.label.player"))).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.recover_player_var = tk.StringVar()
+        self.recover_player_combo = ttk.Combobox(
+            bar, textvariable=self.recover_player_var, state="readonly", width=42,
+        )
+        self.recover_player_combo.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        self.recover_button = ttk.Button(
+            bar, text=tr("infinity_cells.button.recover"), command=self._ui_recover,
+        )
+        self.recover_button.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
+
         # ---- 条目列表 / 编辑表单 ----------------------------------------- #
         body = ttk.Frame(self, padding=(8, 0, 8, 4))
         body.grid(row=2, column=0, sticky="nsew")
@@ -4317,6 +4400,7 @@ class InfinityCellsTab(_Tab):
     ) -> list[InfinityCell]:
         """主线程入口：把已读取的 store 应用到界面。"""
         self.store = store
+        self._refresh_player_choices()
         self.cells = list(store.cells)
         values = [cell.uuid for cell in self.cells]
         active = select_uuid or self.cell_var.get()
@@ -4340,6 +4424,7 @@ class InfinityCellsTab(_Tab):
     def refresh(self) -> None:
         world = self.app.world
         self._update_mismatch(world)
+        self._refresh_player_choices()
         if world is None:
             self.store = None
             self.cells = []
@@ -4371,6 +4456,59 @@ class InfinityCellsTab(_Tab):
     def refresh_cells(self) -> None:
         """刷新无限存储数据（refresh 的别名，便于脚本调用）。"""
         self.refresh()
+
+    def _refresh_player_choices(self) -> None:
+        """刷新目标玩家下拉框（playerdata 中的可读玩家）。"""
+        world = self.app.world
+        values: list[str] = []
+        if world is not None:
+            for player in world.list_players():
+                if (
+                    isinstance(getattr(player, "tag", None), CompoundTag)
+                    and not getattr(player, "_load_error", None)
+                ):
+                    values.append(player.uuid)
+        active = self.recover_player_var.get() if hasattr(self, "recover_player_var") else ""
+        if active not in values:
+            active = values[0] if values else ""
+        self.recover_player_combo.configure(values=values)
+        self.recover_player_var.set(active)
+
+    def _ui_recover(self) -> None:
+        try:
+            self.recover_to_player()
+        except Exception as exc:  # noqa: BLE001 - UI 边界
+            self.app.show_error(tr("dialog.error.recover_infinity.title"), exc)
+
+    def recover_to_player(self) -> int:
+        """把选中的 cell UUID 以引用磁盘 ItemStack 插入目标玩家物品栏。"""
+        world = self.require_world()
+        cell = self.current
+        if cell is None:
+            raise RuntimeError(tr("infinity_cells.error.no_cell_selected"))
+        player_uuid = self.recover_player_var.get().strip()
+        if not player_uuid:
+            raise ValueError(tr("infinity_cells.error.no_player"))
+        if world.version_profile.item_format != "components":
+            raise ValueError(tr("infinity_cells.error.item_format"))
+        player = world.get_player(player_uuid)
+        if not any(player.get_inventory_item(s) is None for s in range(36)):
+            raise ValueError(tr("infinity_cells.error.inventory_full"))
+        before = len(world.backups)
+        slot = insert_cell_recovery(
+            world, player, cell, world.version_profile.item_format,
+        )
+        backups = list(world.backups[before:])
+        try:
+            self.app.player_tab.refresh_players()
+            self.app.player_tab.select_player(player_uuid)
+        except Exception:  # noqa: BLE001
+            pass
+        self.app.show_backups(backups)
+        status = tr("infinity_cells.status.recovered", uuid=player_uuid, slot=slot + 1)
+        self.status_var.set(status)
+        self.app.set_status(status)
+        return slot
 
     def select_cell(self, uuid: str) -> InfinityCell:
         """选中一个存储单元并刷新条目列表。"""

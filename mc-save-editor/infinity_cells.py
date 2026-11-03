@@ -24,10 +24,13 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .backpacks import BackpackDataError, ints_to_uuid, uuid_to_ints
+from .items import make_item
 from .nbt import ByteArray, CompoundTag, IntArray, ListTag, TAG_COMPOUND, to_snbt
 from .world import WorldError
 
 INFINITY_DATA_PATH = "data/infinity_biginteger_cells.dat"
+INFINITY_RECOVERY_ITEM_ID = "extendedae_plus:infinity_biginteger_cell"
+CUSTOM_DATA_COMPONENT = "minecraft:custom_data"
 DATA_KEY = "data"
 FORMAT_VERSION_KEY = "infinity_format_version"
 CELL_LIST_KEY = "infinity_cell_list"
@@ -273,8 +276,43 @@ def get_cell(world, uuid: str) -> Optional[InfinityCell]:
     return list_cells(world).get(uuid)
 
 
+def make_recovery_item(cell: InfinityCell, item_format: str = "components"):
+    """创建一个只引用 cell.uuid 真实内容的无限存储磁盘 ItemStack。"""
+    if item_format != "components":
+        raise InfinityDataError(
+            "恢复无限存储磁盘只支持 1.21.1 的 components 物品格式"
+        )
+    raw_uuid = getattr(cell, "uuid_ints", None)
+    if not isinstance(raw_uuid, (IntArray, list)) or len(raw_uuid) != 4:
+        raise InfinityDataError("无限存储 UUID 必须是 4 个 int")
+    custom = CompoundTag()
+    custom[CELL_UUID_KEY] = IntArray([int(v) for v in raw_uuid])
+    extra = CompoundTag()
+    extra[CUSTOM_DATA_COMPONENT] = custom
+    return make_item(INFINITY_RECOVERY_ITEM_ID, 1, extra, "components")
+
+
+def insert_recovery_item(
+    world, player, cell: InfinityCell, item_format: str = "components",
+) -> int:
+    """向玩家主物品栏（0..35）第一个空槽插入引用磁盘；返回槽位。"""
+    item = make_recovery_item(cell, item_format)
+    slot = next(
+        (s for s in range(36) if player.get_inventory_item(s) is None),
+        None,
+    )
+    if slot is None:
+        raise InfinityDataError("目标玩家物品栏已满（0..35 无空槽位）")
+    player.set_inventory_item(slot, item)
+    world.mark_player_dirty(player)
+    world.flush()
+    return slot
+
+
 __all__ = [
     "INFINITY_DATA_PATH",
+    "INFINITY_RECOVERY_ITEM_ID",
+    "CUSTOM_DATA_COMPONENT",
     "CellEntry",
     "InfinityCell",
     "InfinityCellStore",
@@ -282,8 +320,10 @@ __all__ = [
     "decode_big_integer",
     "encode_big_integer",
     "get_cell",
+    "insert_recovery_item",
     "key_description",
     "key_id",
     "list_cells",
+    "make_recovery_item",
     "uuid_to_ints",
 ]
