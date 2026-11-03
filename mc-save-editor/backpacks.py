@@ -19,11 +19,13 @@ import uuid as uuidlib
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .items import item_count, item_extra, item_id, update_item_fields
+from .items import item_count, item_extra, item_id, make_item, update_item_fields
 from .nbt import ByteArray, CompoundTag, Int, IntArray, ListTag, TAG_COMPOUND
 from .world import WorldError
 
 BACKPACK_DATA_PATH = "data/sophisticatedbackpacks.dat"
+BACKPACK_RECOVERY_ITEM_ID = "sophisticatedbackpacks:backpack"
+STORAGE_UUID_COMPONENT = "sophisticatedcore:storage_uuid"
 DATA_KEY = "data"
 CONTENTS_KEY = "backpackContents"
 UUID_KEY = "uuid"
@@ -284,14 +286,56 @@ def item_description(item: CompoundTag, item_format: str) -> str:
     return f"{item_id(item) or '?'} x{item_count(item, item_format)}{suffix}"
 
 
+def make_recovery_item(backpack: Backpack, item_format: str = "components") -> CompoundTag:
+    """创建一个只引用 backpack.uuid 真实内容的背包 ItemStack。
+
+    物品本身不复制 contents；游戏会按 sophisticatedcore:storage_uuid 回查
+    data/sophisticatedbackpacks.dat。该组件在 1.21.1 中使用 int[4] 编码。
+    """
+    if item_format != "components":
+        raise BackpackDataError(
+            "恢复背包物品只支持 1.21.1 的 components 物品格式"
+        )
+    raw_uuid = getattr(backpack, "uuid_ints", None)
+    if not isinstance(raw_uuid, (IntArray, list)) or len(raw_uuid) != 4:
+        raise BackpackDataError("背包 UUID 必须是 4 个 int")
+    extra = CompoundTag()
+    extra[STORAGE_UUID_COMPONENT] = IntArray([int(v) for v in raw_uuid])
+    return make_item(BACKPACK_RECOVERY_ITEM_ID, 1, extra, "components")
+
+
+def insert_recovery_item(
+    world, player, backpack: Backpack, item_format: str = "components",
+) -> int:
+    """向玩家主物品栏（0..35）第一个空槽插入引用物品；返回槽位。
+
+    物品栏满时不覆盖已有物品。写入由 world.flush() 落盘。
+    """
+    item = make_recovery_item(backpack, item_format)
+    slot = next(
+        (s for s in range(36) if player.get_inventory_item(s) is None),
+        None,
+    )
+    if slot is None:
+        raise BackpackDataError("目标玩家物品栏已满（0..35 无空槽位）")
+    player.set_inventory_item(slot, item)
+    world.mark_player_dirty(player)
+    world.flush()
+    return slot
+
+
 __all__ = [
     "BACKPACK_DATA_PATH",
+    "BACKPACK_RECOVERY_ITEM_ID",
+    "STORAGE_UUID_COMPONENT",
     "Backpack",
     "BackpackDataError",
     "BackpackStore",
     "get_backpack",
+    "insert_recovery_item",
     "ints_to_uuid",
     "item_description",
     "list_backpacks",
+    "make_recovery_item",
     "uuid_to_ints",
 ]
